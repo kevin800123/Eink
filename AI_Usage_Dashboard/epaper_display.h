@@ -24,7 +24,7 @@ class EpaperDisplay {
   void setWindow(uint16_t xStart, uint16_t yStart,
                  uint16_t xEnd, uint16_t yEnd);
   void setCursor(uint16_t x, uint16_t y);
-  void loadFullRefreshWaveform();
+  bool loadFullRefreshWaveform();
   void updateFull();
   void sendCommand(uint8_t value);
   void sendData(uint8_t value);

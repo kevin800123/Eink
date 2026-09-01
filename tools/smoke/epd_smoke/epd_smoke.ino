@@ -32,6 +32,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include "app_config.h"
 #include "board_config.h"
 #include "epaper_display.h"
 
@@ -143,14 +144,28 @@ void drawOrientationPattern() {
   fillRect(70, 98, 52, 14);      // F middle arm
 }
 
+// The stored report is emitted in small chunks with a blocking TX timeout.
+// Printing the whole buffer at once with a zero timeout silently drops most of
+// it whenever the USB CDC ring buffer fills, which is exactly what happened on
+// the first run and cost us the [3], [5] and [6] header lines.
+void printReport() {
+  Serial.setTxTimeoutMs(200);
+  Serial.println();
+  Serial.println("========== EPD SMOKE TEST REPORT ==========");
+  constexpr size_t kChunk = 32;
+  for (size_t offset = 0; offset < reportLen; offset += kChunk) {
+    const size_t n = min(kChunk, reportLen - offset);
+    Serial.write(reinterpret_cast<const uint8_t*>(report) + offset, n);
+    delay(15);
+  }
+  Serial.println("=========== end of report ===========");
+}
+
 void haltForever(const char* verdict) {
   logf("\nRESULT: %s\n", verdict);
   logf("(one-shot complete; no further I2C or SPI activity will occur)\n");
   while (true) {
-    Serial.println();
-    Serial.println("========== EPD SMOKE TEST REPORT ==========");
-    Serial.print(report);
-    Serial.println("=========== end of report ===========");
+    printReport();
     delay(3000);
   }
 }
@@ -239,9 +254,17 @@ void setup() {
     logf("[4] readback input reg 0x00 failed (evidence only, continuing)\n");
   }
 
-  // --- Step 5: single full refresh. ---
-  logf("[5] e-paper init\n");
-  if (!display.begin()) {
+  // --- Step 5: single full refresh, with timing so a BUSY timeout can be told
+  // apart from a panel that simply needs longer than the configured limit. ---
+  logf("[5] e-paper init (BUSY limit %lu ms, BUSY now=%d)\n",
+       static_cast<unsigned long>(AI_DASH_BUSY_TIMEOUT_MS),
+       digitalRead(BoardConfig::EpaperBusy));
+  uint32_t started = millis();
+  const bool initOk = display.begin();
+  logf("    begin() took %lu ms, BUSY now=%d\n",
+       static_cast<unsigned long>(millis() - started),
+       digitalRead(BoardConfig::EpaperBusy));
+  if (!initOk) {
     logf("    FAILED: %s\n", display.lastError());
     haltForever("FAILED - e-paper initialization");
   }
@@ -249,8 +272,17 @@ void setup() {
 
   logf("[6] drawing orientation pattern and refreshing once\n");
   drawOrientationPattern();
-  if (!display.present()) {
+  started = millis();
+  const bool refreshOk = display.present();
+  const uint32_t refreshMs = millis() - started;
+  logf("    present() took %lu ms, BUSY now=%d\n",
+       static_cast<unsigned long>(refreshMs),
+       digitalRead(BoardConfig::EpaperBusy));
+  if (!refreshOk) {
     logf("    FAILED: %s\n", display.lastError());
+    // Distinguish "panel never released BUSY" from "we did not wait long enough".
+    logf("    BUSY still high after timeout means the update never completed;\n");
+    logf("    BUSY low here means the limit was simply too short.\n");
     haltForever("FAILED - e-paper refresh");
   }
   logf("    refresh complete\n");
