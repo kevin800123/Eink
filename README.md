@@ -71,6 +71,16 @@ ai-usage-dashboard/
 └─ README.md
 ```
 
+## 目前狀態（重要）
+
+Phase A 實機驗證**未通過**。firmware 已成功 compile 與 Upload，但板上的
+TCA9554（I2C `0x20`）在第一次 power sequence 後從 I2C bus 消失，電子紙從未被
+本專案刷新過。完整證據、已排除的假設與下一步請見
+[`CODEX_HANDOFF.md`](CODEX_HANDOFF.md)。
+
+診斷 sketch 放在 [`tools/diagnostics/`](tools/diagnostics)，
+其中 `i2c_probe_ro` 為唯讀版本，不會寫入任何暫存器或開啟電源軌。
+
 ## 交接給 Claude
 
 如果下一階段改由 Claude 執行，先讓它閱讀
