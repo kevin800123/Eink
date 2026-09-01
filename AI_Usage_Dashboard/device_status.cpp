@@ -12,21 +12,47 @@
 #endif
 
 void DeviceStatusService::begin() {
-#if !AI_DASH_USE_MOCK_DEVICE_STATUS
+#if AI_DASH_USE_MOCK_DEVICE_STATUS
+  Serial.println("Device status: mock");
+#else
+  Serial.println("Device status: real (battery ADC + Wi-Fi + NTP)");
   pinMode(BoardConfig::BatteryAdc, INPUT);
 
 #if AI_DASH_ENABLE_WIFI
-  if (strlen(AI_DASH_WIFI_SSID) > 0) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(AI_DASH_WIFI_SSID, AI_DASH_WIFI_PASSWORD);
-    const uint32_t started = millis();
-    while (WiFi.status() != WL_CONNECTED &&
-           millis() - started < AI_DASH_WIFI_TIMEOUT_MS) {
-      delay(100);
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      configTzTime(AI_DASH_TIMEZONE, AI_DASH_NTP_SERVER);
-    }
+  if (strlen(AI_DASH_WIFI_SSID) == 0) {
+    Serial.println("Wi-Fi: no SSID configured, staying offline");
+    return;
+  }
+  // The SSID is logged to make connection failures diagnosable. The password is
+  // never logged.
+  Serial.printf("Wi-Fi: connecting to \"%s\" (timeout %lu ms)\n",
+                AI_DASH_WIFI_SSID,
+                static_cast<unsigned long>(AI_DASH_WIFI_TIMEOUT_MS));
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(AI_DASH_WIFI_SSID, AI_DASH_WIFI_PASSWORD);
+  const uint32_t started = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - started < AI_DASH_WIFI_TIMEOUT_MS) {
+    delay(100);
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.printf("Wi-Fi: failed after %lu ms (status %d); continuing offline\n",
+                  static_cast<unsigned long>(millis() - started),
+                  static_cast<int>(WiFi.status()));
+    return;
+  }
+  Serial.printf("Wi-Fi: connected in %lu ms, IP %s, RSSI %d dBm\n",
+                static_cast<unsigned long>(millis() - started),
+                WiFi.localIP().toString().c_str(), WiFi.RSSI());
+
+  configTzTime(AI_DASH_TIMEZONE, AI_DASH_NTP_SERVER);
+  tm now{};
+  if (getLocalTime(&now, 5000)) {
+    char stamp[32];
+    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &now);
+    Serial.printf("NTP: synced, local time %s\n", stamp);
+  } else {
+    Serial.println("NTP: no sync yet; the updated label falls back to uptime");
   }
 #endif
 #endif
@@ -64,14 +90,20 @@ uint8_t DeviceStatusService::readBatteryPercent() {
 
   constexpr uint32_t emptyMv = 3000;
   constexpr uint32_t fullMv = 4120;
+  uint8_t percent;
   if (millivolts <= emptyMv) {
-    return 0;
+    percent = 0;
+  } else if (millivolts >= fullMv) {
+    percent = 100;
+  } else {
+    percent = static_cast<uint8_t>((millivolts - emptyMv) * 100U /
+                                   (fullMv - emptyMv));
   }
-  if (millivolts >= fullMv) {
-    return 100;
-  }
-  return static_cast<uint8_t>((millivolts - emptyMv) * 100U /
-                              (fullMv - emptyMv));
+  // Logged raw so an implausible reading is visible rather than silently
+  // rendered as a confident percentage.
+  Serial.printf("Battery: %lu mV -> %u%%\n",
+                static_cast<unsigned long>(millivolts), percent);
+  return percent;
 }
 
 void DeviceStatusService::updateTimeLabel(DeviceStatus& status) {
