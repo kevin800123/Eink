@@ -1,0 +1,35 @@
+name: Compile Arduino sketch
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: 1.5.1
+
+      - name: Install arduino-esp32 3.3.11
+        run: |
+          arduino-cli core update-index \
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.11 \
+            --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+      - name: Compile for ESP32C6 Dev Module
+        run: >-
+          arduino-cli compile
+          --fqbn
+          esp32:esp32:esp32c6:CDCOnBoot=cdc,CPUFreq=160,FlashFreq=80,FlashMode=qio,FlashSize=16M,PartitionScheme=huge_app,UploadSpeed=921600,ZigbeeMode=default
+          AI_Usage_Dashboard
+

@@ -1,0 +1,14 @@
+#pragma once
+
+// Keep the first upload in mock mode. These settings are only needed when
+// you later want the device status to come from the board and Wi-Fi.
+#define AI_DASH_USE_MOCK_DEVICE_STATUS 0
+#define AI_DASH_ENABLE_WIFI 1
+#define AI_DASH_WIFI_SSID "YOUR_WIFI_SSID"
+#define AI_DASH_WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+
+// Optional overrides:
+// #define AI_DASH_REFRESH_INTERVAL_MS (15UL * 60UL * 1000UL)
+// #define AI_DASH_EPD_POWER_OFF_AFTER_REFRESH 1
+// #define AI_DASH_TIMEZONE "CST-8"
+

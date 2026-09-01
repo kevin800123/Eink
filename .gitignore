@@ -1,0 +1,15 @@
+# Arduino build output
+build/
+*.bin
+*.elf
+*.map
+
+# Private Wi-Fi or endpoint configuration
+AI_Usage_Dashboard/config.local.h
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
