@@ -119,6 +119,25 @@ A latch-up in one of the three I2C devices would fit the observed symptom set
 but nothing in the source proves which difference, if any, could induce it.
 Confirming this needs instrumented hardware measurement, not more code reading.
 
+## Update: the old sequence has now been reproduced
+
+An accidental upload of the old binary (a stale build cache was flashed instead
+of the current build) produced a same-day, same-board A/B comparison:
+
+| Firmware | Sequence | Result |
+|---|---|---|
+| `tools/smoke/epd_smoke` | official | bus healthy, four devices ACK, refresh completes, survives repeated reboots |
+| stale old binary | old | `EPD power-on failed` immediately, bus back in the persistent stuck state |
+
+This raises "the old sequence is the trigger" from unverified to **reproduced
+once under controlled conditions**. It still does not identify *which* of the
+differences above is responsible, and it does not explain the mechanism that
+makes the state survive a reset and require a battery disconnect. Do not write
+it up as an established causal mechanism.
+
+`board_power.cpp` now follows the official sequence and additionally refuses to
+write anything when the bus is already held low.
+
 ## What the smoke firmware does about it
 
 `tools/smoke/epd_smoke/` removes differences 1, 2, 3, 4, 11 and 12 by following

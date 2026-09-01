@@ -71,17 +71,28 @@ ai-usage-dashboard/
 └─ README.md
 ```
 
-## 目前狀態（重要）
+## 目前狀態
 
-舊版 Dashboard 的 Phase A 實機驗證**未通過**。第一次 power sequence 後，
-TCA9554（I2C `0x20`）所在的 bus persistent stuck；拔 USB 無效。實際拔開內建鋰電池
-接頭後，Waveshare 原廠 firmware 已成功刷新電子紙，PWR `OFF -> ON` 亦成功，證明
-硬體目前可工作。確切觸發點仍未驗證，**不要重新燒錄舊版 Dashboard**。完整證據與
-安全的下一步請見
-[`CODEX_HANDOFF.md`](CODEX_HANDOFF.md)。
+**Phase A 已通過。** mock Dashboard 已在實機完整跑通：三個 provider、usage%、
+reset、`BAT`/`WIFI`/`UPDATED`/`MOCK` 全部正確顯示，方向正確，full refresh 約
+1,770 ms 完成。
 
-診斷 sketch 放在 [`tools/diagnostics/`](tools/diagnostics)，
-其中 `i2c_probe_ro` 為唯讀版本，不會寫入任何暫存器或開啟電源軌。
+過程中找到並修正兩個獨立的 root cause：
+
+1. `kFullRefreshWaveform` 宣告 `[159]` 但只寫了 156 個值，尾端被補零，導致送給
+   面板的 gate / source / VCOM 驅動電壓全錯 → BUSY 永不放開、畫面灰底雜訊。
+2. `board_power.cpp` 的 TCA9554 初始化順序與官方 `07_BATT_PWR_Test` 不同 →
+   I2C bus 進入 persistent stuck，且因內建電池而無法用拔 USB 解除。
+
+完整證據、差異表與仍未驗證的項目見 [`CODEX_HANDOFF.md`](CODEX_HANDOFF.md) 與
+[`docs/POWER_SEQUENCE_AUDIT.md`](docs/POWER_SEQUENCE_AUDIT.md)。
+
+燒錄請一律使用 [`tools/upload.ps1`](tools/upload.ps1)（compile 與 upload 為單一
+指令）。裸的 `arduino-cli upload` 會讀到過期的 build 快取。
+
+診斷與 smoke sketch 放在 [`tools/diagnostics/`](tools/diagnostics) 與
+[`tools/smoke/`](tools/smoke)，其中 `i2c_probe_ro` 為唯讀版本，不會寫入任何
+暫存器或開啟電源軌。
 
 ## 交接給 Claude
 
