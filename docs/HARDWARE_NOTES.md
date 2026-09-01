@@ -37,6 +37,23 @@ The TCA9554 is at I2C address `0x20`:
 The software writes output levels before changing TCA9554 direction bits. This
 avoids a short low pulse on a controlled power rail.
 
+## Verified recovery evidence
+
+- SKU 34393 has an internal lithium battery connected through the board's
+  MX1.25 2-pin battery header. Disconnecting USB is not a full power cycle.
+- After the old Dashboard's first power sequence, both SDA GPIO18 and SCL GPIO8
+  were externally held low from early boot; no device ACKed at 100kHz or 400kHz.
+- The Waveshare factory firmware also failed while that state persisted.
+- Physically disconnecting the battery header, waiting, and reconnecting it
+  restored the bus. The factory firmware then refreshed the display and passed
+  a PWR `OFF -> ON` cycle.
+- This proves the hardware worked after the recovery. It does not yet prove the
+  Dashboard power sequence is safe or identify the original trigger.
+
+Keep EXIO5 (`BAT_Control`) out of ordinary display-power changes. Do not call
+USB removal a full power cycle, and do not attempt blind 9-clock bus recovery
+when SCL itself is held low.
+
 ## Refresh policy
 
 - Version 0.1 uses full refresh only.

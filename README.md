@@ -73,9 +73,11 @@ ai-usage-dashboard/
 
 ## 目前狀態（重要）
 
-Phase A 實機驗證**未通過**。firmware 已成功 compile 與 Upload，但板上的
-TCA9554（I2C `0x20`）在第一次 power sequence 後從 I2C bus 消失，電子紙從未被
-本專案刷新過。完整證據、已排除的假設與下一步請見
+舊版 Dashboard 的 Phase A 實機驗證**未通過**。第一次 power sequence 後，
+TCA9554（I2C `0x20`）所在的 bus persistent stuck；拔 USB 無效。實際拔開內建鋰電池
+接頭後，Waveshare 原廠 firmware 已成功刷新電子紙，PWR `OFF -> ON` 亦成功，證明
+硬體目前可工作。確切觸發點仍未驗證，**不要重新燒錄舊版 Dashboard**。完整證據與
+安全的下一步請見
 [`CODEX_HANDOFF.md`](CODEX_HANDOFF.md)。
 
 診斷 sketch 放在 [`tools/diagnostics/`](tools/diagnostics)，
@@ -83,14 +85,16 @@ TCA9554（I2C `0x20`）在第一次 power sequence 後從 I2C bus 消失，電�
 
 ## 交接給 Claude
 
-如果下一階段改由 Claude 執行，先讓它閱讀
+如果下一階段改由 Claude 執行，先讓它閱讀最新的
+[`CODEX_HANDOFF.md`](CODEX_HANDOFF.md) 與
 [`CLAUDE_HANDOFF.md`](CLAUDE_HANDOFF.md)，並把
 [`CLAUDE_PROMPT.md`](CLAUDE_PROMPT.md) 的內容作為第一則 prompt。交接順序已固定為：
 
-1. 重跑 mock compile。
-2. 完成第一次實機 Verify/Upload。
-3. 依照片與 Serial log 驗證結果。
-4. 通過後才處理 real device status 與 Usage Collector。
+1. Audit 現有 `board_power.cpp` 與 Waveshare 官方 TCA9554 / power sequence 差異。
+2. 建立並 compile 最小 one-shot smoke firmware；先停在 Upload 前。
+3. 經使用者確認後 Upload，依照片與 Serial log 驗證。
+4. smoke 通過後才恢復完整 mock Dashboard。
+5. 完整 mock 通過後才處理 real device status 與 Usage Collector。
 
 ## 第一次燒錄
 
@@ -215,11 +219,16 @@ Script 使用與上方相同的 FQBN 設定，輸出放在 `build/`。
 - 只解析到 Arduino core 內建 `Wire 3.3.11` 與 `SPI 3.3.11`
 - Optional Wi-Fi / battery / NTP build 亦通過 compile：1,044,372 bytes、
   50,140 bytes global variables
+- 舊版 Dashboard 與原廠 firmware 都曾在 persistent stuck 狀態重現 TCA9554 failure
+- 唯讀探針確認 SDA GPIO18、SCL GPIO8 從開機早期即 externally held low
+- 真正拔開內建電池接頭後，原廠 firmware 已成功刷新電子紙
+- 原廠 firmware 的 PWR `OFF -> ON` 實機流程成功
 
 尚未驗證：
 
-- 此工作環境沒有直接對你的 COM3 執行 Upload
-- 實機畫面方向、panel batch 差異與長時間 refresh 穩定性需第一次燒錄確認
+- 舊版 Dashboard 觸發 persistent stuck 的確切 root cause
+- 本專案的安全修正版尚未 Upload，且從未成功刷新電子紙
+- 本專案畫面方向、panel batch 差異、BUSY polarity 與長時間 refresh 穩定性
 - 真實 Usage Collector/API 尚未實作
 
 ## Hardware source
