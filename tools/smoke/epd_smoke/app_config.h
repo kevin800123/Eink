@@ -25,8 +25,17 @@
 #define AI_DASH_BUSY_TIMEOUT_MS 15000UL
 #endif
 
+// The official example powers the EPD rail once and leaves it on. Repeatedly
+// switching that rail is an untested deviation on this board, so it stays off
+// by default until repeated-refresh behaviour has real evidence behind it.
 #ifndef AI_DASH_EPD_POWER_OFF_AFTER_REFRESH
-#define AI_DASH_EPD_POWER_OFF_AFTER_REFRESH 1
+#define AI_DASH_EPD_POWER_OFF_AFTER_REFRESH 0
+#endif
+
+// Stop refreshing after this many consecutive failures instead of retrying
+// against a possibly stuck bus forever. The last good image stays on the panel.
+#ifndef AI_DASH_MAX_CONSECUTIVE_FAILURES
+#define AI_DASH_MAX_CONSECUTIVE_FAILURES 3
 #endif
 
 #ifndef AI_DASH_WIFI_SSID

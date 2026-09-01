@@ -18,6 +18,9 @@ constexpr uint8_t EpaperDataCommand = 15;
 constexpr uint8_t I2cClock = 8;
 constexpr uint8_t I2cData = 18;
 constexpr uint8_t Tca9554Address = 0x20;
+// Waveshare's TCA9554 driver runs the bus at 400kHz.
+// esp_io_expander_tca9554.c:18.
+constexpr uint32_t I2cClockHz = 400'000UL;
 
 constexpr uint8_t TcaEpaperPowerMask = 1U << 0;
 constexpr uint8_t TcaAudioPowerMask = 1U << 1;
