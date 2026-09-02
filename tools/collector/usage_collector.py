@@ -12,11 +12,14 @@ Data sources, and why they are what they are:
           primary window and a weekly (10080 minute) secondary window. Reading
           it needs no credential and makes no network call.
 
-  claude  UNAVAILABLE. Verified 2026-09-02: no official API, CLI command or
-          telemetry exposes subscription quota. Claude Code's OpenTelemetry
-          surface is 8 metrics and 12 events, none of which carry quota, limits
-          or reset times, and the desktop app caches nothing on disk. A record
-          appears only at the moment a limit is actually hit.
+  claude  REAL, once tools/collector/claude_statusline.py is configured as the
+          Claude Code statusLine command. Claude Code passes rate_limits on
+          stdin to that command, carrying five_hour.used_percentage,
+          seven_day.used_percentage and their resets_at. This is the only
+          officially documented place the Claude.ai subscription quota appears;
+          it is offered to Pro and Max subscribers after the first API response
+          of a session. Neither the OpenTelemetry surface (8 metrics, 12 events)
+          nor any CLI or API exposes it, and the desktop app caches nothing.
 
   gemini  UNAVAILABLE. Antigravity IDE does display quota, but it stores nothing
           on disk and its local language server requires an auth token for the
@@ -39,6 +42,13 @@ SCHEMA_VERSION = 1
 
 RATE_LIMITS_KEY = "rate_limits"
 RATE_LIMITS_MARKER = '"' + RATE_LIMITS_KEY + '"'
+
+# Written by tools/collector/claude_statusline.py from the documented
+# statusLine payload. See build_claude_provider.
+CLAUDE_CACHE_DEFAULT = Path.home() / ".ai-usage-dashboard" / "claude.json"
+
+WINDOW_FIVE_HOUR = 300
+WINDOW_WEEKLY = 10080
 
 
 def find_codex_rate_limits(sessions_dir, max_files=40):
@@ -110,12 +120,20 @@ def window_state(window, now_ts):
     """
     if not isinstance(window, dict):
         return None
-    resets_at = window.get("resets_at")
     used = window.get("used_percent")
-    if not isinstance(resets_at, (int, float)):
-        return None
     if not isinstance(used, (int, float)):
         return None
+
+    resets_at = window.get("resets_at")
+    if not isinstance(resets_at, (int, float)):
+        # A percentage with no reset time is still real, it just cannot be aged
+        # out. Report it rather than discarding it, and say the reset is unknown.
+        return {
+            "window_minutes": window.get("window_minutes"),
+            "used_percent": max(0, min(100, int(round(used)))),
+            "reset_at": None,
+            "rolled_over": False,
+        }
 
     expired = resets_at <= now_ts
     return {
@@ -157,6 +175,58 @@ def build_codex_provider(sessions_dir):
     return provider
 
 
+def build_claude_provider(cache_path):
+    """Claude quota comes from the documented statusLine payload.
+
+    tools/collector/claude_statusline.py captures rate_limits.five_hour and
+    rate_limits.seven_day, which Claude Code supplies on stdin to whatever
+    command is configured as statusLine. That is the only officially documented
+    place the Claude.ai subscription quota is exposed. It is present only for
+    Pro and Max subscribers and only after the first API response in a session,
+    so absence is normal and is reported rather than guessed at.
+    """
+    if not cache_path.is_file():
+        # Either the statusLine is not configured yet, or no Claude Code session
+        # has produced an API response since it was. Both are normal states.
+        return unavailable("claude", "CLAUDE", "awaiting_statusline_data")
+
+    try:
+        with cache_path.open("r", encoding="utf-8") as handle:
+            cached = json.load(handle)
+    except (OSError, ValueError):
+        return unavailable("claude", "CLAUDE", "cache_unreadable")
+
+    if not isinstance(cached, dict):
+        return unavailable("claude", "CLAUDE", "cache_malformed")
+
+    now_ts = time.time()
+    five_hour = window_state(cached.get("five_hour"), now_ts)
+    seven_day = window_state(cached.get("seven_day"), now_ts)
+    if five_hour is None and seven_day is None:
+        return unavailable("claude", "CLAUDE", "no_rate_limit_record")
+
+    if five_hour is not None:
+        five_hour["window_minutes"] = WINDOW_FIVE_HOUR
+    if seven_day is not None:
+        seven_day["window_minutes"] = WINDOW_WEEKLY
+
+    headline = five_hour or seven_day
+    provider = {
+        "id": "claude",
+        "label": "CLAUDE",
+        "status": "ok",
+        "usage_percent": headline["used_percent"],
+        "reset_at": headline["reset_at"],
+        "captured_at": cached.get("captured_at"),
+        "windows": {},
+    }
+    if five_hour is not None:
+        provider["windows"]["five_hour"] = five_hour
+    if seven_day is not None:
+        provider["windows"]["weekly"] = seven_day
+    return provider
+
+
 def unavailable(provider_id, label, error_code):
     return {
         "id": provider_id,
@@ -166,12 +236,12 @@ def unavailable(provider_id, label, error_code):
     }
 
 
-def build_payload(sessions_dir):
+def build_payload(sessions_dir, claude_cache):
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
         "providers": [
-            unavailable("claude", "CLAUDE", "no_official_api"),
+            build_claude_provider(claude_cache),
             build_codex_provider(sessions_dir),
             unavailable("gemini", "GEMINI", "no_official_api"),
         ],
@@ -182,6 +252,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "AIUsageCollector/0.1"
     token = ""
     sessions_dir = Path()
+    claude_cache = CLAUDE_CACHE_DEFAULT
     cache_seconds = 60
     cache = None
     cache_at = 0.0
@@ -210,7 +281,7 @@ class Handler(BaseHTTPRequestHandler):
 
         now = time.time()
         if Handler.cache is None or now - Handler.cache_at >= Handler.cache_seconds:
-            Handler.cache = build_payload(Handler.sessions_dir)
+            Handler.cache = build_payload(Handler.sessions_dir, Handler.claude_cache)
             Handler.cache_at = now
         self.send_json(200, Handler.cache)
 
@@ -223,6 +294,11 @@ def main():
         "--sessions-dir",
         default=str(Path.home() / ".codex" / "sessions"),
         help="Codex session directory to read",
+    )
+    parser.add_argument(
+        "--claude-cache",
+        default=str(CLAUDE_CACHE_DEFAULT),
+        help="File written by claude_statusline.py",
     )
     parser.add_argument(
         "--cache-seconds",
@@ -240,7 +316,7 @@ def main():
     sessions_dir = Path(args.sessions_dir)
 
     if args.once:
-        payload = build_payload(sessions_dir)
+        payload = build_payload(sessions_dir, Path(args.claude_cache))
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
@@ -255,6 +331,7 @@ def main():
 
     Handler.token = token
     Handler.sessions_dir = sessions_dir
+    Handler.claude_cache = Path(args.claude_cache)
     Handler.cache_seconds = args.cache_seconds
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)

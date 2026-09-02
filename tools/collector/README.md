@@ -8,12 +8,49 @@ provider credential and makes no call to Anthropic, OpenAI or Google.
 
 | Provider | Status | Source |
 |---|---|---|
+| `claude` | **real** | the documented Claude Code `statusLine` payload, captured by `claude_statusline.py` |
 | `codex` | **real** | `~/.codex/sessions/**/rollout-*.jsonl`, written by the official Codex CLI on every turn |
-| `claude` | `unavailable` | no official API, CLI or telemetry exposes subscription quota |
 | `gemini` | `unavailable` | Antigravity IDE shows quota but stores nothing on disk; its local RPC needs an auth token |
 
-Verified 2026-09-02. The unavailable providers return `status: "unavailable"`
+Verified 2026-09-02. An unavailable provider returns `status: "unavailable"`
 plus an `error_code`, never an invented number.
+
+## Claude data
+
+Claude Code passes session JSON on stdin to whatever command is configured as
+`statusLine`, and that payload is the **only officially documented place** the
+Claude.ai subscription quota is exposed:
+
+```json
+"rate_limits": {
+  "five_hour": {"used_percentage": 37, "resets_at": 1788369805},
+  "seven_day": {"used_percentage": 61, "resets_at": 1788662605}
+}
+```
+
+Per the docs the object appears only for Claude.ai Pro and Max subscribers, only
+after the first API response in a session, and Claude Code drops a window once
+its `resets_at` has passed. Absence is therefore normal, and the collector
+reports `awaiting_statusline_data` rather than guessing.
+
+Nothing here reads a credential, and no request is made to Anthropic. The
+statusline script is a passive reader of data Claude Code already hands it.
+
+### Enable it
+
+Add to `~/.claude/settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "python \"<repo>/tools/collector/claude_statusline.py\""
+}
+```
+
+Then restart Claude Code. The script prints a compact line such as
+`Opus | ctx 8% | 5h 37% 1h59m | wk 61% 3d11h` and writes
+`~/.ai-usage-dashboard/claude.json` for the collector. To remove it, delete the
+`statusLine` key.
 
 ## Codex data
 
