@@ -35,6 +35,7 @@ from pathlib import Path
 
 CACHE_DIR = Path.home() / ".ai-usage-dashboard"
 CACHE_FILE = CACHE_DIR / "claude.json"
+HEARTBEAT_FILE = CACHE_DIR / "statusline_heartbeat.json"
 
 
 def write_cache(payload):
@@ -77,11 +78,40 @@ def short_reset(entry):
     return " %dh%02dm" % (hours, minutes)
 
 
+def write_heartbeat(data):
+    """Record that the status line ran, and what it was given.
+
+    This exists to tell three failure modes apart: the command never running,
+    running but being handed no rate_limits, and running with rate_limits that
+    the parser mishandles. Only key names are stored, never their values, so
+    this never captures conversation content.
+    """
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ran_at": int(time.time()),
+            "top_level_keys": sorted(data.keys()) if isinstance(data, dict) else [],
+            "has_rate_limits": isinstance(data.get("rate_limits"), dict)
+            if isinstance(data, dict)
+            else False,
+        }
+        if isinstance(data, dict) and isinstance(data.get("rate_limits"), dict):
+            payload["rate_limit_keys"] = sorted(data["rate_limits"].keys())
+        handle, tmp_path = tempfile.mkstemp(dir=str(CACHE_DIR), suffix=".tmp")
+        with os.fdopen(handle, "w", encoding="utf-8") as tmp:
+            json.dump(payload, tmp, ensure_ascii=False)
+        os.replace(tmp_path, HEARTBEAT_FILE)
+    except OSError:
+        pass
+
+
 def main():
     try:
         data = json.load(sys.stdin)
     except (ValueError, OSError):
         return 0
+
+    write_heartbeat(data)
 
     rate_limits = data.get("rate_limits")
     if not isinstance(rate_limits, dict):
