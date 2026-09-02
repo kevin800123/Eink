@@ -13,3 +13,7 @@ Thumbs.db
 .vscode/
 .idea/
 
+
+# Collector device token
+tools/collector/token.local
+__pycache__/
