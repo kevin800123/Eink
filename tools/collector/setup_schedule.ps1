@@ -1,3 +1,11 @@
+# KNOWN BROKEN, kept for reference. See COLLECTOR_HANDOFF.md section 2.
+# A Windows Scheduled Task runs in a session with no usable window station, so
+# the ConPTY that refresh_claude.py needs cannot attach and the interactive
+# claude turn hangs until the time limit kills it. Verified 2026-09-03: the task
+# stuck in Running and never wrote the cache. Do not rely on this file; the
+# auto-refresh mechanism still needs to be built (a logon-launched hidden
+# python.exe loop is the suggested direction).
+#
 # Register (or remove) a Windows Scheduled Task that refreshes the Claude quota
 # cache by running refresh_claude.py on an interval.
 #
