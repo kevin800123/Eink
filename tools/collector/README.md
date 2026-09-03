@@ -15,6 +15,46 @@ provider credential and makes no call to Anthropic, OpenAI or Google.
 Verified 2026-09-02. An unavailable provider returns `status: "unavailable"`
 plus an `error_code`, never an invented number.
 
+## How Claude quota is obtained (this is the subtle part)
+
+The Claude.ai subscription quota `used_percentage` is exposed in exactly one
+place: the `statusLine` payload, which Claude Code only produces in a real
+interactive session with a pseudo console. It is **not** available from the
+Desktop app, `claude -p`, piped stdin, transcripts, hooks, telemetry, or any
+CLI/API. `claude -p --output-format stream-json` carries a `rate_limit_event`,
+but that has only `status` and `resetsAt`, no percentage. This was all verified
+on 2026-09-02.
+
+Two pieces cooperate:
+
+1. `claude_statusline.py` is configured as the Claude Code `statusLine`. Whenever
+   an interactive session renders its status line, this captures `five_hour` and
+   `seven_day` (`used_percentage` + `resets_at`) to `~/.ai-usage-dashboard/claude.json`.
+2. `refresh_claude.py` produces those renders on a schedule. Since the Desktop
+   app never runs statusLine, this spawns a brief interactive `claude` turn
+   inside a ConPTY (via `pywinpty`), sends one tiny prompt, and waits for the
+   cache timestamp to advance. `rate_limits` appears only after the first API
+   response in a session, so the round trip is required.
+
+The quota is account-wide, so each refresh reflects Desktop usage too. **Cost:**
+one small API call per refresh, against your 5-hour window. The schedule interval
+is therefore a cost/freshness tradeoff.
+
+### Enable the Claude side
+
+```powershell
+# once: install the dependency into the interpreter the task will use
+C:\...\Python314\python.exe -m pip install pywinpty
+
+# schedule the refresher (default every 30 min, hidden, while logged on)
+.\tools\collector\setup_schedule.ps1 -Minutes 30
+# remove with: .\tools\collector\setup_schedule.ps1 -Remove
+```
+
+`refresh_claude.py` finds the CLI via `CLAUDE_BIN`, then `~/.local/bin/claude`,
+then PATH. The `statusLine` entry in `~/.claude/settings.json` must point at
+`claude_statusline.py` (see below).
+
 ## Claude data
 
 Claude Code passes session JSON on stdin to whatever command is configured as
