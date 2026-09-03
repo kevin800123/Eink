@@ -93,7 +93,20 @@ def main():
     # Interactive session with NO positional prompt, so it does not fall into
     # print mode. statusLine only runs this way. The prompt is typed into the
     # pty afterwards. plan mode keeps the throwaway turn from touching anything.
-    argv = [claude, "--permission-mode", "plan"]
+    # Keep this throwaway interactive turn out of Claude Remote Control even if
+    # the user enabled "Remote Control for all sessions" globally. Claude Code
+    # supports loading an additional settings object for one invocation, so
+    # this does not change the user's normal CLI/Desktop preference.
+    invocation_settings = json.dumps(
+        {"disableRemoteControl": True}, separators=(",", ":")
+    )
+    argv = [
+        claude,
+        "--settings",
+        invocation_settings,
+        "--permission-mode",
+        "plan",
+    ]
     debug = os.environ.get("REFRESH_DEBUG")
     sys.stderr.write("spawning: %s\n" % " ".join(argv))
 

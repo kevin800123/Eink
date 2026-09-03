@@ -1,73 +1,160 @@
-# KNOWN BROKEN, kept for reference. See COLLECTOR_HANDOFF.md section 2.
-# A Windows Scheduled Task runs in a session with no usable window station, so
-# the ConPTY that refresh_claude.py needs cannot attach and the interactive
-# claude turn hangs until the time limit kills it. Verified 2026-09-03: the task
-# stuck in Running and never wrote the cache. Do not rely on this file; the
-# auto-refresh mechanism still needs to be built (a logon-launched hidden
-# python.exe loop is the suggested direction).
+# Install a hidden, logon-launched Claude quota refresh supervisor.
 #
-# Register (or remove) a Windows Scheduled Task that refreshes the Claude quota
-# cache by running refresh_claude.py on an interval.
-#
-# refresh_claude.py drives a brief interactive `claude` turn so statusLine
-# records the subscription quota. Each run makes one small API call, so the
-# interval is a direct cost/freshness tradeoff. 30 minutes is a reasonable
-# default; do not go below a few minutes.
+# Task Scheduler and pythonw.exe are intentionally not used: both were proven
+# incompatible with the ConPTY session required by refresh_claude.py. A Startup
+# folder VBScript launches python.exe inside the logged-on user's interactive
+# session with window style 0, leaving a real but invisible console available.
 #
 # Usage:
-#   .\tools\collector\setup_schedule.ps1                 # install, every 30 min
-#   .\tools\collector\setup_schedule.ps1 -Minutes 15     # install, every 15 min
-#   .\tools\collector\setup_schedule.ps1 -Remove         # remove the task
-#
-# The task runs only while you are logged on, because a ConPTY needs an
-# interactive session. It runs hidden, so no console window pops up.
+#   .\tools\collector\setup_schedule.ps1
+#   .\tools\collector\setup_schedule.ps1 -Minutes 30
+#   .\tools\collector\setup_schedule.ps1 -Status
+#   .\tools\collector\setup_schedule.ps1 -Remove
 
 param(
+  [ValidateRange(5, 1440)]
   [int]$Minutes = 30,
+  [string]$ClaudeWorkDir,
+  [switch]$Status,
   [switch]$Remove
 )
 
 $ErrorActionPreference = 'Stop'
-$taskName = 'AI Usage Dashboard - Claude refresh'
 
-if ($Remove) {
-  if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-    Write-Host "Removed scheduled task: $taskName"
-  } else {
-    Write-Host "No scheduled task named '$taskName' was found."
+$here = $PSScriptRoot
+$daemon = Join-Path $here 'claude_refresh_daemon.py'
+$repoRoot = (Resolve-Path (Join-Path $here '..\..')).Path
+if (-not $ClaudeWorkDir) { $ClaudeWorkDir = $repoRoot }
+if (-not (Test-Path -LiteralPath $ClaudeWorkDir -PathType Container)) {
+  throw "Claude working directory not found: $ClaudeWorkDir"
+}
+$ClaudeWorkDir = (Resolve-Path -LiteralPath $ClaudeWorkDir).Path
+$userProfileDir = [Environment]::GetEnvironmentVariable('USERPROFILE')
+if (-not $userProfileDir) { throw 'USERPROFILE is not available.' }
+$stateDir = Join-Path $userProfileDir '.ai-usage-dashboard'
+$stopFile = Join-Path $stateDir 'claude_refresh_daemon.stop'
+$statusFile = Join-Path $stateDir 'claude_refresh_daemon_status.json'
+$logFile = Join-Path $stateDir 'claude_refresh_daemon.log'
+$startupDir = [Environment]::GetFolderPath('Startup')
+$launcher = Join-Path $startupDir 'AIUsageDashboardClaudeRefresh.vbs'
+
+$pythonCandidates = @(
+  (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Python\Python314\python.exe')
+)
+$python = $pythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $python) {
+  $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+  if ($pythonCommand) { $python = $pythonCommand.Source }
+}
+
+function Read-DaemonStatus {
+  if (-not (Test-Path -LiteralPath $statusFile)) { return $null }
+  try {
+    return Get-Content -Raw -LiteralPath $statusFile | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+}
+
+function Test-DaemonProcess([object]$DaemonStatus) {
+  if (-not $DaemonStatus -or -not $DaemonStatus.pid) { return $false }
+  $process = Get-Process -Id ([int]$DaemonStatus.pid) -ErrorAction SilentlyContinue
+  if (-not $process) { return $false }
+  if ($DaemonStatus.python) {
+    try { return $process.Path -eq [string]$DaemonStatus.python } catch { return $false }
+  }
+  return $true
+}
+
+function Request-DaemonStop {
+  New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+  Set-Content -LiteralPath $stopFile -Value 'stop' -Encoding ascii -NoNewline
+  $deadline = (Get-Date).AddSeconds(15)
+  do {
+    $current = Read-DaemonStatus
+    if (-not (Test-DaemonProcess $current)) { return $true }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $deadline)
+  return $false
+}
+
+if ($Status) {
+  $current = Read-DaemonStatus
+  [pscustomobject]@{
+    LauncherInstalled = Test-Path -LiteralPath $launcher
+    ProcessRunning = Test-DaemonProcess $current
+    Pid = if ($current) { $current.pid } else { $null }
+    IntervalMinutes = if ($current) { $current.interval_minutes } else { $null }
+    ClaudeWorkDir = if ($current) { $current.claude_workdir } else { $null }
+    LastCacheCapturedAt = if ($current) { $current.last_cache_captured_at } else { $null }
+    NextRunAt = if ($current) { $current.next_run_at } else { $null }
+    StatusFile = $statusFile
+    LogFile = $logFile
   }
   exit 0
 }
 
-$here = $PSScriptRoot
-$script = Join-Path $here 'refresh_claude.py'
-if (-not (Test-Path -LiteralPath $script)) { throw "Not found: $script" }
-
-# Pin the interpreter that has pywinpty installed.
-$python = 'C:\Users\USER\AppData\Local\Programs\Python\Python314\python.exe'
-if (-not (Test-Path -LiteralPath $python)) {
-  $cmd = Get-Command python -ErrorAction SilentlyContinue
-  if (-not $cmd) { throw 'python.exe not found; edit $python in this script.' }
-  $python = $cmd.Source
+if ($Remove) {
+  if (Test-Path -LiteralPath $launcher) {
+    Remove-Item -LiteralPath $launcher -Force
+  }
+  $stopped = Request-DaemonStop
+  if ($stopped) {
+    Write-Host 'Removed Startup launcher and stopped the refresh supervisor.'
+    exit 0
+  }
+  Write-Warning 'Startup launcher removed, but the current supervisor did not exit within 15 seconds.'
+  exit 1
 }
 
-$action = New-ScheduledTaskAction -Execute $python -Argument "`"$script`""
+if (-not (Test-Path -LiteralPath $daemon)) { throw "Not found: $daemon" }
+if (-not $python) { throw 'python.exe was not found.' }
 
-# Repeat forever at the chosen interval, starting a minute from now.
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-  -RepetitionInterval (New-TimeSpan -Minutes $Minutes)
+& $python -c 'import winpty' 2>$null
+if ($LASTEXITCODE -ne 0) {
+  throw "pywinpty is not installed in $python"
+}
 
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
-  -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden `
-  -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+$existing = Read-DaemonStatus
+if (Test-DaemonProcess $existing) {
+  if (-not (Request-DaemonStop)) {
+    throw 'An existing refresh supervisor did not stop within 15 seconds.'
+  }
+}
+if (Test-Path -LiteralPath $stopFile) {
+  Remove-Item -LiteralPath $stopFile -Force
+}
 
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+# VBScript doubles quotes inside a quoted string. The generated command is:
+#   "python.exe" "claude_refresh_daemon.py" --minutes 30 --claude-workdir "repo"
+$pythonVbs = $python.Replace('"', '""')
+$daemonVbs = $daemon.Replace('"', '""')
+$workDirVbs = $ClaudeWorkDir.Replace('"', '""')
+$vbs = @"
+Set shell = CreateObject("WScript.Shell")
+shell.Run """$pythonVbs"" ""$daemonVbs"" --minutes $Minutes --claude-workdir ""$workDirVbs""", 0, False
+"@
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
-  -Settings $settings -Principal $principal -Force | Out-Null
+New-Item -ItemType Directory -Path $startupDir -Force | Out-Null
+Set-Content -LiteralPath $launcher -Value $vbs -Encoding Unicode
 
-Write-Host "Installed '$taskName': every $Minutes minute(s), hidden, while logged on."
-Write-Host "Each run makes one small API call. Remove with: .\tools\collector\setup_schedule.ps1 -Remove"
-Write-Host "Run it once now to verify:"
-Write-Host "  Start-ScheduledTask -TaskName `"$taskName`""
+$wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+Start-Process -FilePath $wscript -ArgumentList "`"$launcher`"" -WindowStyle Hidden
+
+$deadline = (Get-Date).AddSeconds(15)
+do {
+  Start-Sleep -Milliseconds 250
+  $current = Read-DaemonStatus
+  if (Test-DaemonProcess $current) { break }
+} while ((Get-Date) -lt $deadline)
+
+if (-not (Test-DaemonProcess $current)) {
+  throw "Startup launcher was written, but the supervisor did not start. See $logFile"
+}
+
+Write-Host "Installed hidden Startup launcher: $launcher"
+Write-Host "Supervisor PID: $($current.pid)"
+Write-Host "Refresh interval: $Minutes minute(s)"
+Write-Host "Status: $statusFile"
+Write-Host "Log: $logFile"
+Write-Host 'Remove with: .\tools\collector\setup_schedule.ps1 -Remove'

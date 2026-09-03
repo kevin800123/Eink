@@ -25,16 +25,20 @@ CLI/API. `claude -p --output-format stream-json` carries a `rate_limit_event`,
 but that has only `status` and `resetsAt`, no percentage. This was all verified
 on 2026-09-02.
 
-Two pieces cooperate:
+Three pieces cooperate:
 
 1. `claude_statusline.py` is configured as the Claude Code `statusLine`. Whenever
    an interactive session renders its status line, this captures `five_hour` and
    `seven_day` (`used_percentage` + `resets_at`) to `~/.ai-usage-dashboard/claude.json`.
-2. `refresh_claude.py` produces those renders on a schedule. Since the Desktop
+2. `refresh_claude.py` produces one of those renders on demand. Since the Desktop
    app never runs statusLine, this spawns a brief interactive `claude` turn
    inside a ConPTY (via `pywinpty`), sends one tiny prompt, and waits for the
    cache timestamp to advance. `rate_limits` appears only after the first API
    response in a session, so the round trip is required.
+3. `claude_refresh_daemon.py` supervises that one-shot refresher. A Startup-folder
+   VBScript launches the daemon with hidden `python.exe` in the logged-on user's
+   interactive session. Each child has a hard timeout, so one failed ConPTY does
+   not stop later cycles.
 
 The quota is account-wide, so each refresh reflects Desktop usage too. **Cost:**
 one small API call per refresh, against your 5-hour window. The schedule interval
@@ -46,14 +50,40 @@ is therefore a cost/freshness tradeoff.
 # once: install the dependency into the interpreter the task will use
 C:\...\Python314\python.exe -m pip install pywinpty
 
-# schedule the refresher (default every 30 min, hidden, while logged on)
+# once per clone: open Claude here and accept its workspace trust dialog
+claude
+
+# back at PowerShell in the repository root, verify one refresh
+C:\...\Python314\python.exe .\tools\collector\refresh_claude.py
+
+# install the hidden refresher (immediate first run, then every 30 min)
 .\tools\collector\setup_schedule.ps1 -Minutes 30
-# remove with: .\tools\collector\setup_schedule.ps1 -Remove
+
+# inspect or remove it
+.\tools\collector\setup_schedule.ps1 -Status
+.\tools\collector\setup_schedule.ps1 -Remove
 ```
 
 `refresh_claude.py` finds the CLI via `CLAUDE_BIN`, then `~/.local/bin/claude`,
 then PATH. The `statusLine` entry in `~/.claude/settings.json` must point at
-`claude_statusline.py` (see below).
+`claude_statusline.py` (see below). Claude must already trust the repository
+root. If it is a new clone, run plain `claude` there once, accept the workspace
+trust dialog, then exit before installing the daemon.
+
+The launcher is
+`shell:startup\AIUsageDashboardClaudeRefresh.vbs`. It runs only after this user
+logs on; it does not use Task Scheduler or `pythonw.exe`, both of which lack the
+usable console context that this ConPTY needs. Runtime files are under
+`~/.ai-usage-dashboard/`:
+
+- `claude_refresh_daemon_status.json`: PID, cadence, last result, next run
+- `claude_refresh_daemon.log`: bounded diagnostic log (rotates at 1 MB)
+- `claude_refresh_daemon.stop`: cooperative stop signal used by the installer
+
+The refresher passes invocation-only Claude setting
+`{"disableRemoteControl":true}`. It does not alter the user's global Claude
+settings and prevents these throwaway turns from registering Remote Control
+sessions.
 
 ## Claude data
 

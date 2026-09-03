@@ -51,10 +51,30 @@ WINDOW_FIVE_HOUR = 300
 WINDOW_WEEKLY = 10080
 
 
-def find_codex_rate_limits(sessions_dir, max_files=40):
-    """Return (rate_limits_dict, error_code). Newest session file wins.
+def rate_limits_has_window(limits):
+    """True if a rate_limits dict actually carries a usable window.
 
-    Within a file the last record is kept, since that is the most recent turn.
+    When Codex has no active window to report (e.g. right after a limit is hit)
+    it still writes a rate_limits object, but with primary and secondary both
+    null. Such a record carries no window timing, so it cannot be aged by the
+    rollover rule and must not be treated as the current state. We skip it and
+    fall back to the most recent record that does carry a window; the rollover
+    rule then reports 0 once that window's resets_at has passed.
+    """
+    if not isinstance(limits, dict):
+        return False
+    return isinstance(limits.get("primary"), dict) or isinstance(
+        limits.get("secondary"), dict
+    )
+
+
+def find_codex_rate_limits(sessions_dir, max_files=40):
+    """Return (rate_limits_dict, error_code). Newest usable record wins.
+
+    Within a file the last record that carries a window is kept, since that is
+    the most recent turn with real data. Null-shaped records (primary and
+    secondary both null, written when there is no window to report) are skipped
+    so a fresh limit-exhaustion turn does not blank the dashboard.
     """
     if not sessions_dir.is_dir():
         return None, "sessions_dir_missing"
@@ -71,6 +91,7 @@ def find_codex_rate_limits(sessions_dir, max_files=40):
     if not files:
         return None, "no_session_files"
 
+    saw_record = False
     for path in files:
         latest = None
         try:
@@ -84,12 +105,18 @@ def find_codex_rate_limits(sessions_dir, max_files=40):
                         continue
                     found = extract_rate_limits(record)
                     if found is not None:
-                        latest = found
+                        saw_record = True
+                        if rate_limits_has_window(found):
+                            latest = found
         except OSError:
             continue
         if latest is not None:
             return latest, None
 
+    # Records existed but none carried a window: the account has no window to
+    # report (typically an idle window that has since rolled over).
+    if saw_record:
+        return None, "no_window_data"
     return None, "no_rate_limit_record"
 
 
