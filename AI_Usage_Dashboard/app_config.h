@@ -55,3 +55,32 @@
 #define AI_DASH_NTP_SERVER "pool.ntp.org"
 #endif
 
+// --- Phase D: real usage over HTTP from the local collector ---------------
+// Set AI_DASH_USE_HTTP_COLLECTOR to 1 in config.local.h and fill in the host,
+// port and token to replace the mock data with the collector's real figures.
+// Requires AI_DASH_ENABLE_WIFI=1. The device holds only the collector token,
+// never a provider credential.
+#ifndef AI_DASH_USE_HTTP_COLLECTOR
+#define AI_DASH_USE_HTTP_COLLECTOR 0
+#endif
+
+#ifndef AI_DASH_COLLECTOR_HOST
+#define AI_DASH_COLLECTOR_HOST ""
+#endif
+
+#ifndef AI_DASH_COLLECTOR_PORT
+#define AI_DASH_COLLECTOR_PORT 8770
+#endif
+
+#ifndef AI_DASH_COLLECTOR_PATH
+#define AI_DASH_COLLECTOR_PATH "/v1/dashboard"
+#endif
+
+#ifndef AI_DASH_DEVICE_TOKEN
+#define AI_DASH_DEVICE_TOKEN ""
+#endif
+
+#ifndef AI_DASH_HTTP_TIMEOUT_MS
+#define AI_DASH_HTTP_TIMEOUT_MS 8000UL
+#endif
+

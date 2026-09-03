@@ -12,3 +12,14 @@
 // #define AI_DASH_EPD_POWER_OFF_AFTER_REFRESH 1
 // #define AI_DASH_TIMEZONE "CST-8"
 
+// --- Phase D: real usage from the local collector -------------------------
+// Turn this on to replace the mock data with the collector's real figures.
+// Requires the Wi-Fi settings above. The collector must be running on your PC
+// (tools/collector/run.ps1) and reachable on the LAN. The device holds only
+// this collector token, never a provider credential.
+//
+// #define AI_DASH_USE_HTTP_COLLECTOR 1
+// #define AI_DASH_COLLECTOR_HOST "192.168.0.5"   // your PC's LAN IP
+// #define AI_DASH_COLLECTOR_PORT 8770
+// #define AI_DASH_DEVICE_TOKEN "paste tools/collector/token.local here"
+

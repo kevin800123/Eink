@@ -7,16 +7,25 @@
 #include "dashboard_renderer.h"
 #include "device_status.h"
 #include "epaper_display.h"
-#include "mock_usage_collector.h"
 #include "usage_collector.h"
+#if AI_DASH_USE_HTTP_COLLECTOR
+#include "http_usage_collector.h"
+#else
+#include "mock_usage_collector.h"
+#endif
 
 BoardPower boardPower;
 EpaperDisplay display;
 Canvas1Bit canvas(display);
 DashboardRenderer dashboardRenderer;
 DeviceStatusService deviceStatus;
+#if AI_DASH_USE_HTTP_COLLECTOR
+HttpUsageCollector httpCollector;
+UsageCollector* usageCollector = &httpCollector;
+#else
 MockUsageCollector mockCollector;
 UsageCollector* usageCollector = &mockCollector;
+#endif
 
 uint32_t lastRefreshAt = 0;
 bool firstRefreshComplete = false;
