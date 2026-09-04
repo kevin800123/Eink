@@ -118,8 +118,15 @@ uint8_t DeviceStatusService::readBatteryPercent() {
 }
 
 void DeviceStatusService::updateTimeLabel(DeviceStatus& status) {
-  tm local{};
-  if (getLocalTime(&local, 50)) {
+  // Use the absolute epoch plus a fixed local offset rather than getLocalTime,
+  // which depends on configTzTime having taken effect (it did not on this
+  // board, so the clock read 8 hours behind). time(nullptr) is UTC epoch once
+  // SNTP has synced, which is timezone-independent.
+  const time_t now = time(nullptr);
+  if (now >= 1600000000L) {
+    time_t shifted = now + AI_DASH_UTC_OFFSET_SECONDS;
+    tm local{};
+    gmtime_r(&shifted, &local);
     strftime(status.updatedAt, sizeof(status.updatedAt), "%H:%M", &local);
     return;
   }

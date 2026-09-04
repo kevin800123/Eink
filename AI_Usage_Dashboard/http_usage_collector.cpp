@@ -93,37 +93,47 @@ bool windowResetAt(const String& body, int from, int to, const char* window,
   return findStringField(body, pos, to, "reset_at", out, outSize) >= 0;
 }
 
+// Days since the Unix epoch for a civil date (Howard Hinnant's algorithm).
+long daysFromCivil(int y, int m, int d) {
+  y -= m <= 2;
+  const long era = (y >= 0 ? y : y - 399) / 400;
+  const int yoe = static_cast<int>(y - era * 400);
+  const int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097L + doe - 719468L;
+}
+
 // Convert an RFC 3339 timestamp like "2026-09-04T05:40:00+08:00" into the short
-// "RESET 3H 12M" label, using the device's clock. The RTC keeps time across
-// deep sleep, and the device timezone (CST-8) matches the collector's +08:00,
-// so the wall-clock fields can be read directly. Falls back gracefully before
-// NTP sync or once the window has already rolled over.
+// "RESET 3H 12M" countdown. The absolute instant is computed from the wall-clock
+// fields and the timestamp's OWN UTC offset, then compared against time(nullptr)
+// (UTC epoch after SNTP). This does not rely on the device timezone, which did
+// not take effect on this board. Falls back before sync or once rolled over.
 void resetLabelFrom(const char* iso, char* out, size_t outSize) {
-  int year, mon, day, hour, minute, sec;
-  if (sscanf(iso, "%d-%d-%dT%d:%d:%d", &year, &mon, &day, &hour, &minute,
-             &sec) != 6) {
+  int y, mo, d, h, mi, s;
+  int oh = 0, om = 0;
+  char osign = 'Z';
+  const int n = sscanf(iso, "%d-%d-%dT%d:%d:%d%c%d:%d", &y, &mo, &d, &h, &mi, &s,
+                       &osign, &oh, &om);
+  if (n < 6) {
     snprintf(out, outSize, "RESET --");
     return;
   }
+  long offset = 0;
+  if (n >= 8 && (osign == '+' || osign == '-')) {
+    offset = static_cast<long>(oh) * 3600L + static_cast<long>(om) * 60L;
+    if (osign == '-') offset = -offset;
+  }
+  const long long resetEpoch =
+      static_cast<long long>(daysFromCivil(y, mo, d)) * 86400LL +
+      static_cast<long long>(h) * 3600LL + mi * 60LL + s - offset;
+
   const time_t now = time(nullptr);
   if (now < 1600000000L) {
-    snprintf(out, outSize, "RESET @%02d:%02d", hour, minute);
+    // Before SNTP sync; show the target wall-clock time, not a bad countdown.
+    snprintf(out, outSize, "RESET @%02d:%02d", h, mi);
     return;
   }
-  tm target = {};
-  target.tm_year = year - 1900;
-  target.tm_mon = mon - 1;
-  target.tm_mday = day;
-  target.tm_hour = hour;
-  target.tm_min = minute;
-  target.tm_sec = sec;
-  target.tm_isdst = -1;
-  const time_t reset = mktime(&target);
-  if (reset == static_cast<time_t>(-1)) {
-    snprintf(out, outSize, "RESET @%02d:%02d", hour, minute);
-    return;
-  }
-  long remaining = static_cast<long>(reset - now);
+  long remaining = static_cast<long>(resetEpoch - static_cast<long long>(now));
   if (remaining <= 0) {
     // Already past (window just rolled over); the next reset time is not known.
     snprintf(out, outSize, "RESET --");

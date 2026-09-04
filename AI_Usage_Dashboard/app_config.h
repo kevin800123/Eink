@@ -51,6 +51,13 @@
 #define AI_DASH_TIMEZONE "CST-8"
 #endif
 
+// The local UTC offset in seconds, used directly for the clock label and reset
+// countdown. This does not depend on configTzTime taking effect (it did not on
+// this board), so the displayed time and reset are correct regardless. +08:00.
+#ifndef AI_DASH_UTC_OFFSET_SECONDS
+#define AI_DASH_UTC_OFFSET_SECONDS 28800L
+#endif
+
 #ifndef AI_DASH_NTP_SERVER
 #define AI_DASH_NTP_SERVER "pool.ntp.org"
 #endif
