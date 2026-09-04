@@ -1,6 +1,6 @@
 # TCA9554 power sequence audit
 
-Read-only audit requested by `CODEX_HANDOFF.md` §5.2. This compares the old
+Read-only audit of the board power sequence. This compares the old
 Dashboard's `AI_Usage_Dashboard/board_power.cpp` against the Waveshare official
 example, line by line.
 
@@ -144,7 +144,7 @@ write anything when the bus is already held low.
 the official sequence exactly, and adds a pre-flight bus check that aborts
 before writing anything if `SDA` or `SCL` is already held low.
 
-Deliberate deviation from `CODEX_HANDOFF.md` §5.3 item 3: that note says to keep
+Deliberate deviation from the original plan to keep
 audio off, but the official example sets `P1` high, and matching the known-good
 sequence bit for bit takes priority for the first on-device run. Audio can be
 switched off later, as a single deliberate change, once a baseline exists.
