@@ -5,10 +5,12 @@
 
 namespace {
 
-void setProvider(ProviderUsage& provider, const char* name, uint8_t percent,
-                 const char* resetLabel) {
+void setProvider(ProviderUsage& provider, const char* name, bool available,
+                 uint8_t fiveHour, uint8_t weekly, const char* resetLabel) {
   snprintf(provider.name, sizeof(provider.name), "%s", name);
-  provider.usagePercent = percent;
+  provider.available = available;
+  provider.fiveHourPercent = fiveHour;
+  provider.weeklyPercent = weekly;
   snprintf(provider.resetLabel, sizeof(provider.resetLabel), "%s", resetLabel);
 }
 
@@ -21,9 +23,9 @@ bool MockUsageCollector::begin() {
 bool MockUsageCollector::fetch(DashboardData& output) {
   memset(&output, 0, sizeof(output));
 
-  setProvider(output.providers[0], "CLAUDE", 72, "RESET 3H 42M");
-  setProvider(output.providers[1], "CODEX", 51, "RESET 1H 18M");
-  setProvider(output.providers[2], "GEMINI", 86, "RESET 4H 07M");
+  setProvider(output.providers[0], "CLAUDE", true, 72, 41, "RESET 3H 42M");
+  setProvider(output.providers[1], "CODEX", true, 51, 63, "RESET 1H 18M");
+  setProvider(output.providers[2], "GEMINI", false, 0, 0, "N/A");
 
   output.device.wifiConnected = true;
   output.device.wifiRssi = -58;

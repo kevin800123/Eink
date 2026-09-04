@@ -23,3 +23,11 @@
 // #define AI_DASH_COLLECTOR_PORT 8770
 // #define AI_DASH_DEVICE_TOKEN "paste tools/collector/token.local here"
 
+// --- Battery use without USB (deep sleep) ---------------------------------
+// Refresh once per wake, then deep-sleep for AI_DASH_REFRESH_INTERVAL_MS,
+// drawing microamps. The PC (collector) must be awake when the device wakes.
+// If it does not wake on its own, press PWR; it is not bricked.
+//
+// #define AI_DASH_USE_DEEP_SLEEP 1
+// #define AI_DASH_REFRESH_INTERVAL_MS (30UL * 60UL * 1000UL)  // longer = more battery
+

@@ -45,14 +45,25 @@ void DeviceStatusService::begin() {
                 static_cast<unsigned long>(millis() - started),
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-  configTzTime(AI_DASH_TIMEZONE, AI_DASH_NTP_SERVER);
-  tm now{};
-  if (getLocalTime(&now, 5000)) {
-    char stamp[32];
-    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &now);
-    Serial.printf("NTP: synced, local time %s\n", stamp);
+  // The ESP32 RTC keeps time across deep sleep, so only sync when the clock is
+  // not already set. This avoids a multi-second NTP wait on every timer wake.
+  if (time(nullptr) >= 1600000000L) {
+    tm now{};
+    if (getLocalTime(&now, 50)) {
+      char stamp[32];
+      strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &now);
+      Serial.printf("NTP: RTC already set, local time %s\n", stamp);
+    }
   } else {
-    Serial.println("NTP: no sync yet; the updated label falls back to uptime");
+    configTzTime(AI_DASH_TIMEZONE, AI_DASH_NTP_SERVER);
+    tm now{};
+    if (getLocalTime(&now, 5000)) {
+      char stamp[32];
+      strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &now);
+      Serial.printf("NTP: synced, local time %s\n", stamp);
+    } else {
+      Serial.println("NTP: no sync yet; the updated label falls back to uptime");
+    }
   }
 #endif
 #endif

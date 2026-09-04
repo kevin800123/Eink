@@ -5,6 +5,7 @@
 class BoardPower {
  public:
   bool begin();
+  bool resume();
   bool setEpaper(bool enabled);
   bool shutdownBatteryPower();
   const char* lastError() const;

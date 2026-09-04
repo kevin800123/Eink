@@ -84,3 +84,20 @@
 #define AI_DASH_HTTP_TIMEOUT_MS 8000UL
 #endif
 
+// --- Deep sleep (for battery use without USB) ------------------------------
+// When enabled, the device refreshes once per wake then deep-sleeps for the
+// refresh interval, drawing microamps instead of keeping the ESP32 + Wi-Fi
+// awake. The e-paper keeps its image with no power during sleep. On a timer
+// wake the board resumes without the full power reset (see BoardPower::resume).
+// Default off, so USB-powered always-on behaviour is unchanged.
+#ifndef AI_DASH_USE_DEEP_SLEEP
+#define AI_DASH_USE_DEEP_SLEEP 0
+#endif
+
+// After a failed refresh, sleep this long before retrying instead of the full
+// interval, so a transient outage (e.g. PC asleep) recovers sooner. Never busy-
+// halt in deep-sleep mode; that would drain the battery.
+#ifndef AI_DASH_DEEP_SLEEP_RETRY_SECONDS
+#define AI_DASH_DEEP_SLEEP_RETRY_SECONDS 300UL
+#endif
+

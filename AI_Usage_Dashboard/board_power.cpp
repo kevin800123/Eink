@@ -69,6 +69,30 @@ bool BoardPower::begin() {
   return true;
 }
 
+bool BoardPower::resume() {
+  // Called after a deep-sleep timer wake. The TCA9554 kept the battery rail
+  // latched (EXIO5 high) and the EPD rail on throughout sleep, because it is
+  // powered by the very rail it holds. So DO NOT run begin()'s reset: its
+  // intermediate "all inputs" (0xFF) step stops actively driving EXIO5 and can
+  // drop the rail on battery-only power. Instead re-establish the I2C master
+  // and write the known-good direction and level directly. Writing the
+  // direction as 0xDC drives EXIO5 from the retained output latch (already 1),
+  // so the hold never glitches.
+  Wire.begin(BoardConfig::I2cData, BoardConfig::I2cClock);
+  Wire.setClock(BoardConfig::I2cClockHz);
+
+  direction_ = static_cast<uint8_t>(kDirectionDefault & ~kControlledPins);
+  output_ = kOutputDefault;
+  if (!writeRegister(kConfigurationRegister, direction_) ||
+      !writeRegister(kOutputRegister, output_)) {
+    setError("TCA9554 not responding after wake");
+    return false;
+  }
+  delay(20);
+  setError("ok");
+  return true;
+}
+
 bool BoardPower::setEpaper(bool enabled) {
   return applyOutput(BoardConfig::TcaEpaperPowerMask, enabled);
 }

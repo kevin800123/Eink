@@ -84,9 +84,60 @@ bool windowPercent(const String& body, int from, int to, const char* window,
   return findIntField(body, pos, to, "used_percent", out);
 }
 
+// Read reset_at from a nested window object within [from, to).
+bool windowResetAt(const String& body, int from, int to, const char* window,
+                   char* out, size_t outSize) {
+  String needle = String("\"") + window + "\"";
+  int pos = body.indexOf(needle, from);
+  if (pos < 0 || pos >= to) return false;
+  return findStringField(body, pos, to, "reset_at", out, outSize) >= 0;
+}
+
+// Convert an RFC 3339 timestamp like "2026-09-04T05:40:00+08:00" into the short
+// "RESET 3H 12M" label, using the device's clock. The RTC keeps time across
+// deep sleep, and the device timezone (CST-8) matches the collector's +08:00,
+// so the wall-clock fields can be read directly. Falls back gracefully before
+// NTP sync or once the window has already rolled over.
+void resetLabelFrom(const char* iso, char* out, size_t outSize) {
+  int year, mon, day, hour, minute, sec;
+  if (sscanf(iso, "%d-%d-%dT%d:%d:%d", &year, &mon, &day, &hour, &minute,
+             &sec) != 6) {
+    snprintf(out, outSize, "RESET --");
+    return;
+  }
+  const time_t now = time(nullptr);
+  if (now < 1600000000L) {
+    snprintf(out, outSize, "RESET @%02d:%02d", hour, minute);
+    return;
+  }
+  tm target = {};
+  target.tm_year = year - 1900;
+  target.tm_mon = mon - 1;
+  target.tm_mday = day;
+  target.tm_hour = hour;
+  target.tm_min = minute;
+  target.tm_sec = sec;
+  target.tm_isdst = -1;
+  const time_t reset = mktime(&target);
+  if (reset == static_cast<time_t>(-1)) {
+    snprintf(out, outSize, "RESET @%02d:%02d", hour, minute);
+    return;
+  }
+  long remaining = static_cast<long>(reset - now);
+  if (remaining <= 0) {
+    // Already past (window just rolled over); the next reset time is not known.
+    snprintf(out, outSize, "RESET --");
+    return;
+  }
+  long hours = remaining / 3600;
+  long mins = (remaining % 3600) / 60;
+  if (hours > 999) hours = 999;
+  snprintf(out, outSize, "RESET %ldH %02ldM", hours, mins);
+}
+
 // Parse one provider object, whose fields lie in [from, to), into slot.
-// The display shows the 5-hour window as the headline number and bar, and both
-// the 5-hour and weekly percentages on the lower line ("5H x% WK y%").
+// Fills the 5-hour and weekly percentages and a reset countdown from the
+// 5-hour window. Unavailable providers are marked, never given a fake number.
 bool parseProvider(const String& body, int from, int to, ProviderUsage& slot,
                    const char* fallbackId) {
   char label[sizeof(slot.name)] = {0};
@@ -102,11 +153,13 @@ bool parseProvider(const String& body, int from, int to, ProviderUsage& slot,
   const bool ok = strcmp(status, "ok") == 0;
 
   if (!ok) {
-    // Never invent a number for an unavailable provider.
-    slot.usagePercent = 0;
+    slot.available = false;
+    slot.fiveHourPercent = 0;
+    slot.weeklyPercent = 0;
     snprintf(slot.resetLabel, sizeof(slot.resetLabel), "N/A");
     return true;
   }
+  slot.available = true;
 
   // Bound the 5-hour search so it cannot read into the weekly window.
   const int fivePos = body.indexOf("\"five_hour\"", from);
@@ -118,20 +171,30 @@ bool parseProvider(const String& body, int from, int to, ProviderUsage& slot,
   long week = -1;
   if (weekPos >= 0) windowPercent(body, weekPos, to, "weekly", week);
 
-  // Headline is the 5-hour window; fall back to the top-level usage_percent if
-  // the windows object is unexpectedly absent.
-  long headline = five;
-  if (headline < 0) {
+  // Fall back to the top-level usage_percent (the 5-hour value) if the windows
+  // object is unexpectedly absent.
+  if (five < 0) {
+    long headline = 0;
     if (!findIntField(body, from, to, "usage_percent", headline)) return false;
+    five = headline;
   }
-  slot.usagePercent = static_cast<uint8_t>(clampPercent(headline));
+  slot.fiveHourPercent = static_cast<uint8_t>(clampPercent(five));
+  slot.weeklyPercent = static_cast<uint8_t>(clampPercent(week < 0 ? 0 : week));
 
-  if (week >= 0) {
-    snprintf(slot.resetLabel, sizeof(slot.resetLabel), "5H %d%% WK %d%%",
-             clampPercent(five < 0 ? headline : five), clampPercent(week));
+  char resetAt[40] = {0};
+  bool gotReset = false;
+  if (fivePos >= 0) {
+    gotReset = windowResetAt(body, fivePos, fiveEnd, "five_hour", resetAt,
+                             sizeof(resetAt));
+  }
+  if (!gotReset) {
+    gotReset = findStringField(body, from, to, "reset_at", resetAt,
+                               sizeof(resetAt)) >= 0;
+  }
+  if (gotReset && resetAt[0]) {
+    resetLabelFrom(resetAt, slot.resetLabel, sizeof(slot.resetLabel));
   } else {
-    snprintf(slot.resetLabel, sizeof(slot.resetLabel), "5H %d%%",
-             clampPercent(five < 0 ? headline : five));
+    snprintf(slot.resetLabel, sizeof(slot.resetLabel), "RESET --");
   }
   return true;
 }

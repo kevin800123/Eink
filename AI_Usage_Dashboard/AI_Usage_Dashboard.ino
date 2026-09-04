@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_sleep.h>
 
 #include "app_config.h"
 #include "board_power.h"
@@ -78,51 +79,90 @@ bool refreshDashboard() {
   return true;
 }
 
+#if AI_DASH_USE_DEEP_SLEEP
+void deepSleepFor(uint32_t seconds) {
+  Serial.printf("Deep sleeping for %lu s\n",
+                static_cast<unsigned long>(seconds));
+  Serial.flush();
+  esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(seconds) * 1000000ULL);
+  esp_deep_sleep_start();  // does not return
+}
+#endif
+
 void setup() {
   Serial.begin(115200);
   // Never block on USB CDC while no host is attached; the report below raises
   // this again so the boot lines are not silently dropped.
   Serial.setTxTimeoutMs(0);
 
+  // A deep-sleep timer wake keeps the TCA9554 latched, so the rail and EPD
+  // power are already on; resume without begin()'s reset, which could drop the
+  // battery rail. A cold boot (PWR button, USB, or reset) runs begin().
+  const bool timerWake =
+      esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
+
   // Latch battery power as early as possible. On a battery boot the PWR button
   // only holds the rail up until EXIO5 is asserted, so this must not wait for
   // logging. The result is printed once the USB CDC host has had time to attach.
-  const bool powerOk = boardPower.begin();
+  const bool powerOk = timerWake ? boardPower.resume() : boardPower.begin();
   const char* powerError = boardPower.lastError();
 
   delay(1000);
   Serial.setTxTimeoutMs(200);
   Serial.println();
-  Serial.println("AI Usage Dashboard booting");
+  Serial.printf("AI Usage Dashboard booting (%s)\n",
+                timerWake ? "timer wake" : "cold boot");
 
   if (!powerOk) {
     Serial.printf("Board power initialization failed: %s\n", powerError);
+#if AI_DASH_USE_DEEP_SLEEP
+    deepSleepFor(AI_DASH_DEEP_SLEEP_RETRY_SECONDS);
+#else
     haltWith("board power initialization failed");
+#endif
     return;
   }
 
   // Waveshare's 07_BATT_PWR_Test.ino:69-71 refuses to continue while PWR is
   // still held. A bound is added here so a pin stuck low cannot hang the boot.
-  pinMode(BoardConfig::PowerButton, INPUT_PULLUP);
-  const uint32_t waitStarted = millis();
-  while (digitalRead(BoardConfig::PowerButton) == LOW &&
-         millis() - waitStarted < 5000UL) {
-    delay(100);
+  // A timer wake never involves the button, so skip the wait then.
+  if (!timerWake) {
+    pinMode(BoardConfig::PowerButton, INPUT_PULLUP);
+    const uint32_t waitStarted = millis();
+    while (digitalRead(BoardConfig::PowerButton) == LOW &&
+           millis() - waitStarted < 5000UL) {
+      delay(100);
+    }
   }
 
   deviceStatus.begin();
   if (!usageCollector->begin()) {
     Serial.printf("Usage collector initialization failed: %s\n",
                   usageCollector->lastError());
+#if AI_DASH_USE_DEEP_SLEEP
+    deepSleepFor(AI_DASH_DEEP_SLEEP_RETRY_SECONDS);
+#else
     haltWith("usage collector initialization failed");
+#endif
     return;
   }
 
-  firstRefreshComplete = refreshDashboard();
+  const bool ok = refreshDashboard();
+
+#if AI_DASH_USE_DEEP_SLEEP
+  // Refresh once per wake, then sleep at microamps. On failure retry sooner so
+  // a transient outage (e.g. the PC asleep) recovers without a full interval.
+  const uint32_t sleepSeconds = ok
+                                    ? (AI_DASH_REFRESH_INTERVAL_MS / 1000UL)
+                                    : AI_DASH_DEEP_SLEEP_RETRY_SECONDS;
+  deepSleepFor(sleepSeconds);
+#else
+  firstRefreshComplete = ok;
   lastRefreshAt = millis();
   if (!firstRefreshComplete) {
     consecutiveFailures = 1;
   }
+#endif
 }
 
 void loop() {
