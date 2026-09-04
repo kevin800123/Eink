@@ -1,251 +1,221 @@
-# AI Usage Dashboard for Waveshare ESP32-C6 e-Paper 1.54
+# AI Usage Dashboard — Waveshare ESP32-C6 e-Paper 1.54
 
-可直接用 Arduino IDE 燒錄的第一版 AI Usage Dashboard，目標硬體為
-Waveshare ESP32-C6-ePaper-1.54（SKU 34393，200×200 黑白電子紙）。
+一台桌上型電子紙儀表板,顯示你**真實的 AI 用量還剩多少**。目標硬體為
+Waveshare ESP32-C6-ePaper-1.54（SKU 34393,200×200 黑白電子紙）。
 
-目前 Claude、Codex、Gemini 的 usage 與 reset time 都是明確標示的 mock
-data；專案已預留 `UsageCollector` 介面，後續可改接自建的 Usage Collector
-API。沒有假設 Claude、Codex 或 Gemini 存在可直接從 ESP32 呼叫的官方 usage
-API。
+- **CLAUDE**：真實訂閱配額(5 小時 + 7 天視窗)。
+- **CODEX**：真實用量(5 小時 + 週視窗)。
+- **GEMINI**：無官方 usage API,標示為 unavailable,**絕不虛構數字**。
 
-## 已完成
+裝置本身**不持有任何 AI 服務的帳號憑證**。用量由一支在你 PC 上執行的
+collector 統一提供,ESP32 只透過 LAN 打一個 `GET /v1/dashboard`。
 
-- 相容 `Arduino IDE 2.x`、`arduino-esp32 3.3.11`、`ESP32C6 Dev Module`
-- 產品專用 GPIO、TCA9554 e-paper power 與 battery power-hold 控制
-- 200×200 1-bit framebuffer、內建 5×7 font 與 dashboard renderer
-- Claude / Codex / Gemini mock usage、reset time
-- Wi-Fi、電池百分比、更新時間與 mock 標記
-- 預設每 15 分鐘 full refresh，刷新後讓 e-paper 休眠並關閉顯示電源
-- 不需 LVGL、GxEPD2、Adafruit GFX 或額外 Arduino Library
-- 本機已用 arduino-esp32 `3.3.11` compile 驗證
-- GitHub Actions 會在 push / pull request 重跑相同 target 的 compile
-
-## 畫面內容
+## 畫面
 
 ```text
 ┌────────────────────────┐
-│ AI USAGE       WiFi Bat│
+│ AI USAGE        .ii [=] │
 ├────────────────────────┤
-│ CLAUDE             72% │
-│ [#############------]  │
-│ RESET 3H 42M           │
+│ CLAUDE                 │
+│ 5H [######......]  45% │
+│ WK [###.........]  25% │
+│ RESET 3H 59M           │
 ├────────────────────────┤
-│ CODEX              51% │
-│ [##########---------]  │
-│ RESET 1H 18M           │
+│ CODEX                  │
+│ 5H [............]   0% │
+│ WK [#####.......]  43% │
+│ RESET --               │
 ├────────────────────────┤
-│ GEMINI             86% │
-│ [################---]  │
-│ RESET 4H 07M           │
-├────────────────────────┤
-│ BAT 86% WIFI DEMO      │
-│ UPDATED 22:48      MOCK│
+│ BAT 84% WIFI ONLINE    │
+│ UPDATED 23:40          │
 └────────────────────────┘
 ```
+
+每個 provider 顯示 5 小時與週兩條進度條、以及最近視窗的 reset 倒數。視窗剛
+歸零(rollover)時倒數顯示 `RESET --`。
+
+## 架構
+
+```text
+Claude Code (statusLine)  Codex CLI (session files)
+        │                        │
+        ▼                        ▼
+   本機檔案 ~/.ai-usage-dashboard/claude.json、~/.codex/sessions
+        │                        │
+        └────────┬───────────────┘
+                 ▼
+     PC collector  usage_collector.py   ← 只讀本機檔,不持有憑證
+                 │  GET /v1/dashboard (Bearer token, LAN, plain HTTP)
+                 ▼
+   ESP32-C6  HttpUsageCollector → DashboardData → e-paper
+```
+
+- **Claude** 的訂閱配額百分比只出現在官方 statusLine payload。`claude_statusline.py`
+  把它寫進本機快取;`claude_refresh_daemon.py` 每 30 分鐘用一次極短的互動
+  session 觸發它更新。
+- **Codex** 由官方 CLI 每輪寫進 `rollout-*.jsonl`,collector 直接讀,零成本。
+- 視窗過期即歸零(rollover rule),舊資料不會謊報。
+
+資料契約見 [`docs/API_CONTRACT.md`](docs/API_CONTRACT.md);collector 細節見
+[`tools/collector/README.md`](tools/collector/README.md)。
+
+## 硬體注意事項(踩過的坑)
+
+1. **內建 LiPo 電池**:拔 USB **不等於**斷電/重置。I2C bus 若卡死,只有實際拔掉
+   MX1.25 電池接頭才能解除(要開殼)。
+2. **沒有 RST 鍵**,只有 PWR(GPIO2)與 BOOT(GPIO9)。
+3. **深睡版本不好重燒**:deep sleep 開啟時 USB 序列埠只在每次醒來幾秒出現,一般
+   `upload.ps1` 會撲空。改用 [`tools/flash_deepsleep.ps1`](tools/flash_deepsleep.ps1)
+   並按住 BOOT —— 下次定時喚醒時 ROM 讀到 BOOT=低,進入穩定的下載模式。
+4. **`configTzTime("CST-8")` 在這塊板子沒生效**,時間會慢 8 小時。因此時鐘與 reset
+   倒數改用「絕對 epoch + 固定 +8h 位移」(`AI_DASH_UTC_OFFSET_SECONDS`)計算,不依賴
+   裝置時區。
+
+完整電源時序稽核見 [`docs/POWER_SEQUENCE_AUDIT.md`](docs/POWER_SEQUENCE_AUDIT.md),
+硬體來源對照見 [`docs/HARDWARE_NOTES.md`](docs/HARDWARE_NOTES.md)。
+
+## 設定：PC 端(collector)
+
+collector 只讀本機檔,不轉發任何憑證。它在 LAN 上以 plain HTTP 提供服務,用一個
+device token 認證。
+
+### 1. 相依
+
+- Python(collector server 只用標準庫;Claude 刷新的 `refresh_claude.py` 需要
+  `pywinpty`)。
+- 已登入的 Claude Code CLI 與 Codex CLI。
+
+```powershell
+C:\path\to\python.exe -m pip install pywinpty
+```
+
+### 2. 開機自動常駐(推薦)
+
+兩支 installer 會在登入時以隱藏視窗啟動,幾乎不耗能(閒置 socket + 每天約十幾秒
+CPU),且不會阻止 PC 睡眠:
+
+```powershell
+# Claude 配額刷新 daemon(每 30 分鐘)
+.\tools\collector\setup_schedule.ps1 -Minutes 30
+# collector HTTP server(0.0.0.0:8770)
+.\tools\collector\setup_server_autostart.ps1
+```
+
+兩者都支援 `-Status` 與 `-Remove`。Startup 資料夾會出現兩個可讀的檔名:
+`AI Usage Dashboard - Claude Refresh.vbs`、`AI Usage Dashboard - Collector Server.vbs`。
+
+### 3. 防火牆
+
+裝置要能連到 PC 的 8770 埠(以系統管理員身分執行一次):
+
+```powershell
+New-NetFirewallRule -DisplayName "AI Usage Dashboard collector" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8770 -Profile Any -RemoteAddress LocalSubnet
+```
+
+### 4. token 與 IP
+
+- device token 由 `run.ps1` 產生,存在 `tools/collector/token.local`(**gitignored**)。
+- 把 PC 的 LAN IP(例如 `192.168.0.5`)填進裝置的 `config.local.h`。建議在路由器把
+  該 IP 設成 DHCP 固定保留,否則 IP 一變裝置就連不到、需重燒。
+
+前景手動啟動(除錯用):`.\tools\collector\run.ps1`。
+
+## 設定：裝置端(firmware)
+
+### 1. config.local.h
+
+複製 `config.local.h.example` 為 `config.local.h`(gitignored,**不要 commit**),填入:
+
+```cpp
+#define AI_DASH_WIFI_SSID     "你的2.4GHz Wi-Fi"   // ESP32-C6 只支援 2.4GHz
+#define AI_DASH_WIFI_PASSWORD "你的密碼"
+#define AI_DASH_ENABLE_WIFI 1
+#define AI_DASH_USE_MOCK_DEVICE_STATUS 0
+
+#define AI_DASH_USE_HTTP_COLLECTOR 1
+#define AI_DASH_COLLECTOR_HOST "192.168.0.5"        // 你 PC 的 LAN IP
+#define AI_DASH_COLLECTOR_PORT 8770
+#define AI_DASH_DEVICE_TOKEN "貼上 token.local 的內容"
+
+#define AI_DASH_USE_DEEP_SLEEP 1                     // 電池使用
+#define AI_DASH_REFRESH_INTERVAL_MS (30UL * 60UL * 1000UL)
+```
+
+不設 `AI_DASH_USE_HTTP_COLLECTOR` 時,firmware 會退回 `MockUsageCollector`,可離線
+驗證版面。
+
+### 2. 燒錄
+
+Arduino IDE 2.x + `arduino-esp32 3.3.11` + `ESP32C6 Dev Module`,Tools 選項見
+[`docs/HARDWARE_NOTES.md`](docs/HARDWARE_NOTES.md)。命令列一次完成 compile+upload:
+
+```powershell
+# 一般(裝置未深睡時)
+.\tools\upload.ps1
+
+# 深睡版本重燒：執行後按住 BOOT,等定時喚醒進下載模式
+.\tools\flash_deepsleep.ps1
+```
+
+務必用這兩支腳本,不要用裸 `arduino-cli upload`(會讀到過期 build 快取,曾把
+known-bad firmware 燒回板子)。
+
+## 電池運作
+
+`AI_DASH_USE_DEEP_SLEEP 1` 時,裝置每次醒來刷新一次、然後深睡到下個間隔,期間只耗
+微安培,電子紙以 0 功耗保留畫面。喚醒的那一刻 **PC 需開著在網路上**才抓得到新資料;
+PC 睡/關時保留上一張,PC 回來後下次自動補上。深睡喚醒失敗時按 BOOT 重燒即可,不會
+變磚。
 
 ## Repo 結構
 
 ```text
 ai-usage-dashboard/
-├─ .github/workflows/compile.yml # compile CI pinned to arduino-esp32 3.3.11
-├─ CLAUDE_HANDOFF.md             # Claude 技術交接與接手順序
-├─ CLAUDE_PROMPT.md              # 可直接貼給 Claude 的 prompt
 ├─ AI_Usage_Dashboard/
-│  ├─ AI_Usage_Dashboard.ino     # setup / refresh loop / dependency wiring
-│  ├─ app_config.h               # safe defaults
-│  ├─ config.local.h.example     # optional private Wi-Fi settings
-│  ├─ board_config.h             # product-specific pins
-│  ├─ board_power.*              # TCA9554 power rails
-│  ├─ epaper_display.*           # 200×200 display driver
-│  ├─ canvas_1bit.*              # framebuffer drawing primitives and font
-│  ├─ dashboard_model.h          # normalized data model
-│  ├─ dashboard_renderer.*       # screen layout
-│  ├─ usage_collector.h          # future collector interface
-│  ├─ mock_usage_collector.*     # version 0.1 data source
-│  └─ device_status.*            # optional real Wi-Fi, battery, and NTP time
+│  ├─ AI_Usage_Dashboard.ino      # setup/refresh、deep sleep、wake 偵測
+│  ├─ app_config.h                # 所有可調參數的安全預設
+│  ├─ config.local.h.example      # 私人設定範本(實檔 gitignored)
+│  ├─ board_config.h              # 產品腳位
+│  ├─ board_power.*               # TCA9554 電源軌 + deep-sleep resume()
+│  ├─ epaper_display.*            # 200×200 顯示驅動
+│  ├─ canvas_1bit.*              # framebuffer 繪圖 + 內建 font
+│  ├─ dashboard_model.h           # 正規化資料模型
+│  ├─ dashboard_renderer.*        # 兩欄雙進度條版面
+│  ├─ usage_collector.h           # collector 介面
+│  ├─ mock_usage_collector.*      # 離線 mock 資料源
+│  ├─ http_usage_collector.*      # 真實資料源(打 /v1/dashboard)
+│  └─ device_status.*             # Wi-Fi、電池、NTP 時間
+├─ tools/
+│  ├─ compile.ps1                 # compile-only
+│  ├─ upload.ps1                  # compile+upload(一般)
+│  ├─ flash_deepsleep.ps1         # compile+upload(深睡版本)
+│  └─ collector/                  # PC 端 collector 與排程
+│     ├─ usage_collector.py       # HTTP server + Codex/Claude 讀取
+│     ├─ claude_statusline.py     # statusLine 指令,寫 Claude 快取
+│     ├─ refresh_claude.py        # 用 ConPTY 觸發一次刷新
+│     ├─ claude_refresh_daemon.py # 每 30 分鐘刷新的常駐 supervisor
+│     ├─ run.ps1                  # 啟動 server、產 token
+│     ├─ setup_schedule.ps1       # 安裝/移除 Claude 刷新 daemon 自動啟動
+│     ├─ setup_server_autostart.ps1 # 安裝/移除 server 自動啟動
+│     └─ README.md
 ├─ docs/
 │  ├─ API_CONTRACT.md
-│  └─ HARDWARE_NOTES.md
-├─ tools/compile.ps1
-├─ THIRD_PARTY_NOTICES.md
-└─ README.md
+│  ├─ HARDWARE_NOTES.md
+│  └─ POWER_SEQUENCE_AUDIT.md
+└─ .github/workflows/compile.yml  # CI compile,pinned arduino-esp32 3.3.11
 ```
 
-## 目前狀態
+## 安全與紀律
 
-**Phase A 已通過。** mock Dashboard 已在實機完整跑通：三個 provider、usage%、
-reset、`BAT`/`WIFI`/`UPDATED`/`MOCK` 全部正確顯示，方向正確，full refresh 約
-1,770 ms 完成。
-
-過程中找到並修正兩個獨立的 root cause：
-
-1. `kFullRefreshWaveform` 宣告 `[159]` 但只寫了 156 個值，尾端被補零，導致送給
-   面板的 gate / source / VCOM 驅動電壓全錯 → BUSY 永不放開、畫面灰底雜訊。
-2. `board_power.cpp` 的 TCA9554 初始化順序與官方 `07_BATT_PWR_Test` 不同 →
-   I2C bus 進入 persistent stuck，且因內建電池而無法用拔 USB 解除。
-
-完整證據、差異表與仍未驗證的項目見 [`CODEX_HANDOFF.md`](CODEX_HANDOFF.md) 與
-[`docs/POWER_SEQUENCE_AUDIT.md`](docs/POWER_SEQUENCE_AUDIT.md)。
-
-燒錄請一律使用 [`tools/upload.ps1`](tools/upload.ps1)（compile 與 upload 為單一
-指令）。裸的 `arduino-cli upload` 會讀到過期的 build 快取。
-
-診斷與 smoke sketch 放在 [`tools/diagnostics/`](tools/diagnostics) 與
-[`tools/smoke/`](tools/smoke)，其中 `i2c_probe_ro` 為唯讀版本，不會寫入任何
-暫存器或開啟電源軌。
-
-## 交接給 Claude
-
-如果下一階段改由 Claude 執行，先讓它閱讀最新的
-[`CODEX_HANDOFF.md`](CODEX_HANDOFF.md) 與
-[`CLAUDE_HANDOFF.md`](CLAUDE_HANDOFF.md)，並把
-[`CLAUDE_PROMPT.md`](CLAUDE_PROMPT.md) 的內容作為第一則 prompt。交接順序已固定為：
-
-1. Audit 現有 `board_power.cpp` 與 Waveshare 官方 TCA9554 / power sequence 差異。
-2. 建立並 compile 最小 one-shot smoke firmware；先停在 Upload 前。
-3. 經使用者確認後 Upload，依照片與 Serial log 驗證。
-4. smoke 通過後才恢復完整 mock Dashboard。
-5. 完整 mock 通過後才處理 real device status 與 Usage Collector。
-
-## 第一次燒錄
-
-### 1. 開啟 sketch
-
-用 Arduino IDE 開啟：
-
-```text
-AI_Usage_Dashboard/AI_Usage_Dashboard.ino
-```
-
-不要只複製 `.ino`；同資料夾內的 `.h/.cpp` 都是必要檔案。
-
-### 2. 確認開發板套件
-
-- Boards Manager：`esp32 by Espressif Systems`
-- Version：`3.3.11`
-- Board：`ESP32C6 Dev Module`
-- Port：選擇板子目前的 COM port
-
-### 3. 設定 Tools 選項
-
-| 選項 | 值 |
-|---|---|
-| USB CDC On Boot | Enabled |
-| CPU Frequency | 160MHz (WiFi) |
-| Core Debug Level | None |
-| Flash Frequency | 80MHz |
-| Flash Mode | QIO |
-| Flash Size | 16MB (128Mb) |
-| Partition Scheme | Huge APP (3MB No OTA/1MB SPIFFS) |
-| Upload Speed | 921600 |
-| Zigbee Mode | Disabled |
-
-這組設定與 Waveshare 官方 repo 的 Tools Configuration 一致。
-
-### 4. Verify 與 Upload
-
-1. 先按 `Verify`。
-2. Verify 成功後按 `Upload`。
-3. 若卡在連線，按住板上的 `BOOT`，開始 Upload，看到連線後放開。
-4. 開啟 Serial Monitor，baud rate 選 `115200`。
-
-成功時會看到：
-
-```text
-AI Usage Dashboard booting
-Dashboard refreshed
-```
-
-電子紙 full refresh 會閃動數次，約數秒後停在 dashboard，屬正常現象。
-
-> 燒錄會覆蓋出廠 demo。需要還原時，使用 Waveshare 官方 repo 的
-> `03_Firmware`；本專案不會自動備份或還原原廠 firmware。
-
-## 預設行為
-
-- usage、reset、Wi-Fi、電池與更新時間都是 mock data。
-- 第一次開機不需要 Wi-Fi，也不會把任何 credential 寫入 firmware。
-- Dashboard 立即刷新一次，之後每 15 分鐘刷新。
-- e-paper 顯示完成後進入 deep sleep，畫面仍會保留。
-
-要改 mock 值，編輯：
-
-```text
-AI_Usage_Dashboard/mock_usage_collector.cpp
-```
-
-## 啟用真實裝置狀態
-
-這一步只會把 Wi-Fi、battery ADC 與 updated time 改成真實值；三家 AI usage
-仍維持 mock。
-
-1. 複製 `config.local.h.example` 為 `config.local.h`。
-2. 填入 Wi-Fi SSID 與 password。
-3. 確認以下設定：
-
-```cpp
-#define AI_DASH_USE_MOCK_DEVICE_STATUS 0
-#define AI_DASH_ENABLE_WIFI 1
-```
-
-`config.local.h` 已被 `.gitignore` 排除，不要把 credential commit 到 GitHub。
-
-電池百分比沿用 Waveshare 範例的 3.00V=0%、4.12V=100% 線性估算；它不是精密
-fuel gauge，接近滿電與低電量時誤差會較大。
-
-## 串接真實 Usage Collector
-
-不要把三家服務的 account token 放進 ESP32。建議架構：
-
-```text
-Claude / Codex / Gemini
-          ↓
-server-side Usage Collector
-          ↓ normalized HTTPS JSON
-ESP32-C6 HttpUsageCollector
-          ↓
-DashboardData → e-paper
-```
-
-實作邊界、JSON schema、錯誤與 security 規則見
-[`docs/API_CONTRACT.md`](docs/API_CONTRACT.md)。
-
-## Command-line compile
-
-如果已安裝 Arduino IDE 2.x，可在 PowerShell 執行：
-
-```powershell
-.\tools\compile.ps1
-```
-
-Script 使用與上方相同的 FQBN 設定，輸出放在 `build/`。
-
-## 已驗證與未驗證
-
-已驗證：
-
-- arduino-esp32 `3.3.11` compile exit code `0`
-- Mock-first build：322,726 bytes，約 10% program storage
-- Global variables：22,020 bytes，約 6% dynamic memory
-- 只解析到 Arduino core 內建 `Wire 3.3.11` 與 `SPI 3.3.11`
-- Optional Wi-Fi / battery / NTP build 亦通過 compile：1,044,372 bytes、
-  50,140 bytes global variables
-- 舊版 Dashboard 與原廠 firmware 都曾在 persistent stuck 狀態重現 TCA9554 failure
-- 唯讀探針確認 SDA GPIO18、SCL GPIO8 從開機早期即 externally held low
-- 真正拔開內建電池接頭後，原廠 firmware 已成功刷新電子紙
-- 原廠 firmware 的 PWR `OFF -> ON` 實機流程成功
-
-尚未驗證：
-
-- 舊版 Dashboard 觸發 persistent stuck 的確切 root cause
-- 本專案的安全修正版尚未 Upload，且從未成功刷新電子紙
-- 本專案畫面方向、panel batch 差異、BUSY polarity 與長時間 refresh 穩定性
-- 真實 Usage Collector/API 尚未實作
+- ESP32 **不含**任何 provider 的 OAuth token / 帳密;只有一個 collector device token。
+- 不可用時明確標 `unavailable` + `error_code`,不虛構數字。
+- collector 目前是 **plain HTTP**,token 在 LAN 上明文,僅限自控網路;對外前必須加 TLS。
+- 不要 commit `config.local.h`、`tools/collector/token.local` 或任何憑證(皆已 gitignore)。
 
 ## Hardware source
 
 腳位、power rail、display controller sequence 與 waveform 以
 [Waveshare 官方 ESP32-C6-ePaper-1.54 repo](https://github.com/waveshareteam/ESP32-C6-ePaper-1.54)
-commit `c4c47b6a8001f9daa50b38912393c158371e03be` 為基準。詳細對照與授權邊界見
+commit `c4c47b6a8001f9daa50b38912393c158371e03be` 為基準。授權邊界見
 [`docs/HARDWARE_NOTES.md`](docs/HARDWARE_NOTES.md) 與
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
