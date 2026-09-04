@@ -43,6 +43,11 @@ if ($ShowToken) {
 
 $python = (Get-Command python -ErrorAction SilentlyContinue).Source
 if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue).Source }
+if (-not $python) {
+  # At logon PATH may not carry python; fall back to the pinned interpreter.
+  $pinned = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Python\Python314\python.exe'
+  if (Test-Path -LiteralPath $pinned) { $python = $pinned }
+}
 if (-not $python) { throw 'Python was not found on PATH.' }
 
 # Report the LAN addresses the ESP32 can actually reach, since 0.0.0.0 is not

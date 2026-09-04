@@ -36,7 +36,10 @@ $stopFile = Join-Path $stateDir 'claude_refresh_daemon.stop'
 $statusFile = Join-Path $stateDir 'claude_refresh_daemon_status.json'
 $logFile = Join-Path $stateDir 'claude_refresh_daemon.log'
 $startupDir = [Environment]::GetFolderPath('Startup')
-$launcher = Join-Path $startupDir 'AIUsageDashboardClaudeRefresh.vbs'
+# A clearly readable name so the Startup folder is self-explanatory. The old
+# camel-case name is cleaned up on the next install if it is still present.
+$launcher = Join-Path $startupDir 'AI Usage Dashboard - Claude Refresh.vbs'
+$legacyLauncher = Join-Path $startupDir 'AIUsageDashboardClaudeRefresh.vbs'
 
 $pythonCandidates = @(
   (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Python\Python314\python.exe')
@@ -98,6 +101,9 @@ if ($Remove) {
   if (Test-Path -LiteralPath $launcher) {
     Remove-Item -LiteralPath $launcher -Force
   }
+  if (Test-Path -LiteralPath $legacyLauncher) {
+    Remove-Item -LiteralPath $legacyLauncher -Force
+  }
   $stopped = Request-DaemonStop
   if ($stopped) {
     Write-Host 'Removed Startup launcher and stopped the refresh supervisor.'
@@ -137,6 +143,10 @@ shell.Run """$pythonVbs"" ""$daemonVbs"" --minutes $Minutes --claude-workdir ""$
 
 New-Item -ItemType Directory -Path $startupDir -Force | Out-Null
 Set-Content -LiteralPath $launcher -Value $vbs -Encoding Unicode
+# Remove the old camel-case launcher so only the readable name remains.
+if (Test-Path -LiteralPath $legacyLauncher) {
+  Remove-Item -LiteralPath $legacyLauncher -Force
+}
 
 $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
 Start-Process -FilePath $wscript -ArgumentList "`"$launcher`"" -WindowStyle Hidden
