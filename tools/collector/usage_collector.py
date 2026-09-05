@@ -313,7 +313,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, Handler.cache)
 
 
+def _ensure_std_streams():
+    # Under pythonw.exe there is no console, so sys.stdout/sys.stderr are None
+    # and any write to them raises. The scheduled/hidden launch uses pythonw, so
+    # redirect them to the null device to keep logging calls harmless.
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+
+
 def main():
+    _ensure_std_streams()
     parser = argparse.ArgumentParser(description="AI Usage Dashboard collector")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8770)
@@ -349,10 +360,19 @@ def main():
 
     token = os.environ.get("AI_DASH_DEVICE_TOKEN", "")
     if not token:
+        # Fall back to token.local next to this script so a scheduled task can
+        # run the server (e.g. via pythonw) without setting an env var.
+        token_file = Path(__file__).resolve().parent / "token.local"
+        try:
+            token = token_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            token = ""
+    if not token:
         sys.stderr.write(
-            "Refusing to start without AI_DASH_DEVICE_TOKEN set. The collector "
-            "listens on the LAN, so an unauthenticated endpoint would expose "
-            "your usage to anyone on the network.\n"
+            "Refusing to start without a token (AI_DASH_DEVICE_TOKEN env or "
+            "token.local). The collector listens on the LAN, so an "
+            "unauthenticated endpoint would expose your usage to anyone on the "
+            "network.\n"
         )
         return 2
 

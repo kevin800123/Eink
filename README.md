@@ -91,18 +91,21 @@ C:\path\to\python.exe -m pip install pywinpty
 
 ### 2. 開機自動常駐(推薦)
 
-兩支 installer 會在登入時以隱藏視窗啟動,幾乎不耗能(閒置 socket + 每天約十幾秒
-CPU),且不會阻止 PC 睡眠:
+兩支 installer 會在登入時以隱藏視窗(pythonw / VBScript window style 0)啟動,幾乎
+不耗能(閒置 socket + 每天約十幾秒 CPU),且不會阻止 PC 睡眠:
 
 ```powershell
-# Claude 配額刷新 daemon(每 30 分鐘)
-.\tools\collector\setup_schedule.ps1 -Minutes 30
-# collector HTTP server(0.0.0.0:8770)
+# Claude 配額刷新 daemon(間隔分鐘數,建議 15)
+.\tools\collector\setup_schedule.ps1 -Minutes 15
+# collector HTTP server(0.0.0.0:8770,附自癒 supervisor)
 .\tools\collector\setup_server_autostart.ps1
 ```
 
 兩者都支援 `-Status` 與 `-Remove`。Startup 資料夾會出現兩個可讀的檔名:
 `AI Usage Dashboard - Claude Refresh.vbs`、`AI Usage Dashboard - Collector Server.vbs`。
+
+collector server 由 `collector_server_daemon.py` 這個 supervisor 看守:server 一旦
+崩潰或在 PC 睡眠時被收掉,supervisor 會自動重啟它,不必等重新登入。
 
 ### 3. 防火牆
 
@@ -193,10 +196,11 @@ ai-usage-dashboard/
 │     ├─ usage_collector.py       # HTTP server + Codex/Claude 讀取
 │     ├─ claude_statusline.py     # statusLine 指令,寫 Claude 快取
 │     ├─ refresh_claude.py        # 用 ConPTY 觸發一次刷新
-│     ├─ claude_refresh_daemon.py # 每 30 分鐘刷新的常駐 supervisor
-│     ├─ run.ps1                  # 啟動 server、產 token
+│     ├─ claude_refresh_daemon.py # 定期刷新 Claude 的常駐 supervisor
+│     ├─ collector_server_daemon.py # 看守 server,崩潰即自動重啟
+│     ├─ run.ps1                  # 前景啟動 server、產 token(除錯用)
 │     ├─ setup_schedule.ps1       # 安裝/移除 Claude 刷新 daemon 自動啟動
-│     ├─ setup_server_autostart.ps1 # 安裝/移除 server 自動啟動
+│     ├─ setup_server_autostart.ps1 # 安裝/移除 server 自癒常駐
 │     └─ README.md
 ├─ docs/
 │  ├─ API_CONTRACT.md
