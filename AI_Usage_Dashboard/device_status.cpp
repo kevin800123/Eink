@@ -127,7 +127,7 @@ void DeviceStatusService::updateTimeLabel(DeviceStatus& status) {
     time_t shifted = now + AI_DASH_UTC_OFFSET_SECONDS;
     tm local{};
     gmtime_r(&shifted, &local);
-    strftime(status.updatedAt, sizeof(status.updatedAt), "%H:%M", &local);
+    strftime(status.updatedAt, sizeof(status.updatedAt), "%m-%d %H:%M", &local);
     return;
   }
 
