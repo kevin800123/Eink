@@ -5,7 +5,7 @@ Waveshare ESP32-C6-ePaper-1.54（SKU 34393,200×200 黑白電子紙）。
 
 - **CLAUDE**：真實訂閱配額(5 小時 + 7 天視窗)。
 - **CODEX**：真實用量(5 小時 + 週視窗)。
-- **GEMINI**：無官方 usage API,標示為 unavailable,**絕不虛構數字**。
+- **GEMINI**：無官方 usage API,面板上不顯示(collector 仍回報 unavailable,**絕不虛構數字**)。
 
 裝置本身**不持有任何 AI 服務的帳號憑證**。用量由一支在你 PC 上執行的
 collector 統一提供,ESP32 只透過 LAN 打一個 `GET /v1/dashboard`。
@@ -51,7 +51,7 @@ Claude Code (statusLine)  Codex CLI (session files)
 ```
 
 - **Claude** 的訂閱配額百分比只出現在官方 statusLine payload。`claude_statusline.py`
-  把它寫進本機快取;`claude_refresh_daemon.py` 每 30 分鐘用一次極短的互動
+  把它寫進本機快取;`claude_refresh_daemon.py` 定期(預設 15 分鐘)用一次極短的互動
   session 觸發它更新。
 - **Codex** 由官方 CLI 每輪寫進 `rollout-*.jsonl`,collector 直接讀,零成本。
 - 視窗過期即歸零(rollover rule),舊資料不會謊報。
@@ -105,7 +105,9 @@ C:\path\to\python.exe -m pip install pywinpty
 `AI Usage Dashboard - Claude Refresh.vbs`、`AI Usage Dashboard - Collector Server.vbs`。
 
 collector server 由 `collector_server_daemon.py` 這個 supervisor 看守:server 一旦
-崩潰或在 PC 睡眠時被收掉,supervisor 會自動重啟它,不必等重新登入。
+崩潰或在 PC 睡眠時被收掉,supervisor 會自動重啟它,不必等重新登入。Claude 刷新
+daemon 同樣有看門狗(`claude_daemon_watchdog.py`,由 `setup_schedule.ps1` 一併安裝),
+daemon 死掉時會自動重跑它。兩邊都自癒。
 
 ### 3. 防火牆
 
@@ -197,6 +199,7 @@ ai-usage-dashboard/
 │     ├─ claude_statusline.py     # statusLine 指令,寫 Claude 快取
 │     ├─ refresh_claude.py        # 用 ConPTY 觸發一次刷新
 │     ├─ claude_refresh_daemon.py # 定期刷新 Claude 的常駐 supervisor
+│     ├─ claude_daemon_watchdog.py # 看守 daemon,死掉即自動重啟
 │     ├─ collector_server_daemon.py # 看守 server,崩潰即自動重啟
 │     ├─ run.ps1                  # 前景啟動 server、產 token(除錯用)
 │     ├─ setup_schedule.ps1       # 安裝/移除 Claude 刷新 daemon 自動啟動

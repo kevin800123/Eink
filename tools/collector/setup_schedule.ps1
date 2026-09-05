@@ -41,6 +41,10 @@ $startupDir = [Environment]::GetFolderPath('Startup')
 $launcher = Join-Path $startupDir 'AI Usage Dashboard - Claude Refresh.vbs'
 $legacyLauncher = Join-Path $startupDir 'AIUsageDashboardClaudeRefresh.vbs'
 
+# Watchdog that restarts the daemon if it dies (crash / killed on PC sleep).
+$watchdog = Join-Path $here 'claude_daemon_watchdog.py'
+$watchdogLauncher = Join-Path $startupDir 'AI Usage Dashboard - Claude Refresh Watchdog.vbs'
+
 $pythonCandidates = @(
   (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Python\Python314\python.exe')
 )
@@ -48,6 +52,24 @@ $python = $pythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Selec
 if (-not $python) {
   $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
   if ($pythonCommand) { $python = $pythonCommand.Source }
+}
+
+# pythonw.exe (no console) for the watchdog, which only monitors and relaunches.
+$pythonw = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Python\Python314\pythonw.exe'
+if (-not (Test-Path -LiteralPath $pythonw)) {
+  $pythonwCommand = Get-Command pythonw.exe -ErrorAction SilentlyContinue
+  if ($pythonwCommand) { $pythonw = $pythonwCommand.Source }
+}
+
+function Test-WatchdogRunning {
+  return [bool](Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*claude_daemon_watchdog.py*' })
+}
+
+function Stop-Watchdog {
+  Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*claude_daemon_watchdog.py*' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
 function Read-DaemonStatus {
@@ -86,6 +108,8 @@ if ($Status) {
   [pscustomobject]@{
     LauncherInstalled = Test-Path -LiteralPath $launcher
     ProcessRunning = Test-DaemonProcess $current
+    WatchdogInstalled = Test-Path -LiteralPath $watchdogLauncher
+    WatchdogRunning = Test-WatchdogRunning
     Pid = if ($current) { $current.pid } else { $null }
     IntervalMinutes = if ($current) { $current.interval_minutes } else { $null }
     ClaudeWorkDir = if ($current) { $current.claude_workdir } else { $null }
@@ -98,6 +122,11 @@ if ($Status) {
 }
 
 if ($Remove) {
+  # Stop the watchdog first so it does not relaunch the daemon during removal.
+  if (Test-Path -LiteralPath $watchdogLauncher) {
+    Remove-Item -LiteralPath $watchdogLauncher -Force
+  }
+  Stop-Watchdog
   if (Test-Path -LiteralPath $launcher) {
     Remove-Item -LiteralPath $launcher -Force
   }
@@ -120,6 +149,10 @@ if (-not $python) { throw 'python.exe was not found.' }
 if ($LASTEXITCODE -ne 0) {
   throw "pywinpty is not installed in $python"
 }
+
+# Stop any existing watchdog first so it does not relaunch the old daemon while
+# we are restarting it.
+Stop-Watchdog
 
 $existing = Read-DaemonStatus
 if (Test-DaemonProcess $existing) {
@@ -162,9 +195,26 @@ if (-not (Test-DaemonProcess $current)) {
   throw "Startup launcher was written, but the supervisor did not start. See $logFile"
 }
 
+# Install + start the watchdog that restarts the daemon if it ever dies.
+$watchdogOk = $false
+if ((Test-Path -LiteralPath $watchdog) -and $pythonw) {
+  $pythonwVbs = $pythonw.Replace('"', '""')
+  $watchdogPathVbs = $watchdog.Replace('"', '""')
+  $wdVbs = @"
+Set shell = CreateObject("WScript.Shell")
+shell.Run """$pythonwVbs"" ""$watchdogPathVbs""", 0, False
+"@
+  Set-Content -LiteralPath $watchdogLauncher -Value $wdVbs -Encoding Unicode
+  Start-Process -FilePath $wscript -ArgumentList "`"$watchdogLauncher`"" -WindowStyle Hidden
+  $wdDeadline = (Get-Date).AddSeconds(8)
+  do { Start-Sleep -Milliseconds 300 } while (-not (Test-WatchdogRunning) -and (Get-Date) -lt $wdDeadline)
+  $watchdogOk = Test-WatchdogRunning
+}
+
 Write-Host "Installed hidden Startup launcher: $launcher"
 Write-Host "Supervisor PID: $($current.pid)"
 Write-Host "Refresh interval: $Minutes minute(s)"
+Write-Host ("Watchdog: {0}" -f $(if ($watchdogOk) { 'running (restarts the daemon if it dies)' } else { 'NOT started - check pythonw' }))
 Write-Host "Status: $statusFile"
 Write-Host "Log: $logFile"
 Write-Host 'Remove with: .\tools\collector\setup_schedule.ps1 -Remove'
