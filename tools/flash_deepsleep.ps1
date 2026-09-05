@@ -48,28 +48,40 @@ Write-Host 'Compiling a fresh build (no board needed yet)...'
 if ($LASTEXITCODE -ne 0) { throw 'Compile failed; not attempting to upload.' }
 
 Write-Host ''
-Write-Host '>>> Now PRESS AND HOLD the BOOT button, and keep holding. <<<'
-Write-Host 'Waiting for the serial port to appear on the next wake...'
+Write-Host 'Leave this running. It waits for the device to wake (the serial port'
+Write-Host 'appears), then uploads automatically and retries on the next wake if'
+Write-Host 'a window is missed. Holding BOOT is optional but makes it more reliable.'
+Write-Host ''
 
-$before = [System.IO.Ports.SerialPort]::GetPortNames()
-$target = $Port
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-while ((Get-Date) -lt $deadline) {
-  $now = [System.IO.Ports.SerialPort]::GetPortNames()
-  if ($Port) {
-    if ($now -contains $Port) { $target = $Port; break }
-  } else {
-    if ($now -contains 'COM3') { $target = 'COM3'; break }
-    $fresh = $now | Where-Object { $before -notcontains $_ }
-    if ($fresh) { $target = $fresh | Select-Object -First 1; break }
+$uploaded = $false
+while ((Get-Date) -lt $deadline -and -not $uploaded) {
+  # Wait for a serial port to appear on the next wake.
+  $before = [System.IO.Ports.SerialPort]::GetPortNames()
+  $target = $null
+  while ((Get-Date) -lt $deadline) {
+    $now = [System.IO.Ports.SerialPort]::GetPortNames()
+    if ($Port) {
+      if ($now -contains $Port) { $target = $Port; break }
+    } else {
+      if ($now -contains 'COM3') { $target = 'COM3'; break }
+      $fresh = $now | Where-Object { $before -notcontains $_ }
+      if ($fresh) { $target = $fresh | Select-Object -First 1; break }
+    }
+    Start-Sleep -Milliseconds 200
   }
-  Start-Sleep -Milliseconds 200
+  if (-not $target) { break }
+
+  Write-Host "Port $target appeared - uploading the fresh build now..."
+  & $cliPath upload --fqbn $fqbn --input-dir $buildPath -p $target $sketchPath
+  if ($LASTEXITCODE -eq 0) { $uploaded = $true; break }
+
+  Write-Host 'Upload attempt failed (likely missed the wake window). Waiting for the next wake...'
+  Start-Sleep -Seconds 3
 }
 
-if (-not $target) {
-  throw "No serial port appeared within $TimeoutSeconds s. Is the board powered and cabled, and did you hold BOOT?"
+if ($uploaded) {
+  Write-Host 'Flashed successfully.'
+  exit 0
 }
-
-Write-Host "Port $target appeared - uploading the fresh build now (keep holding BOOT until writing starts)..."
-& $cliPath upload --fqbn $fqbn --input-dir $buildPath -p $target $sketchPath
-exit $LASTEXITCODE
+throw "Did not flash within $TimeoutSeconds s. Is the board powered and cabled? Try holding BOOT."
