@@ -22,6 +22,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $here = $PSScriptRoot
+. (Join-Path $here 'process_control.ps1')
 $daemon = Join-Path $here 'claude_refresh_daemon.py'
 $repoRoot = (Resolve-Path (Join-Path $here '..\..')).Path
 if (-not $ClaudeWorkDir) { $ClaudeWorkDir = $repoRoot }
@@ -62,14 +63,11 @@ if (-not (Test-Path -LiteralPath $pythonw)) {
 }
 
 function Test-WatchdogRunning {
-  return [bool](Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*claude_daemon_watchdog.py*' })
+  return [bool](@(Get-OwnedPythonProcesses $watchdog).Count)
 }
 
 function Stop-Watchdog {
-  Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*claude_daemon_watchdog.py*' } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  Stop-OwnedPythonProcesses $watchdog
 }
 
 function Read-DaemonStatus {
@@ -83,12 +81,8 @@ function Read-DaemonStatus {
 
 function Test-DaemonProcess([object]$DaemonStatus) {
   if (-not $DaemonStatus -or -not $DaemonStatus.pid) { return $false }
-  $process = Get-Process -Id ([int]$DaemonStatus.pid) -ErrorAction SilentlyContinue
-  if (-not $process) { return $false }
-  if ($DaemonStatus.python) {
-    try { return $process.Path -eq [string]$DaemonStatus.python } catch { return $false }
-  }
-  return $true
+  $entry = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$DaemonStatus.pid)" -ErrorAction Stop
+  return Test-OwnedPythonProcess $entry $daemon
 }
 
 function Request-DaemonStop {
@@ -114,6 +108,9 @@ if ($Status) {
     IntervalMinutes = if ($current) { $current.interval_minutes } else { $null }
     ClaudeWorkDir = if ($current) { $current.claude_workdir } else { $null }
     LastCacheCapturedAt = if ($current) { $current.last_cache_captured_at } else { $null }
+    LastSuccessAt = if ($current) { $current.last_success_at } else { $null }
+    SourceHealthy = if ($current) { $current.source_healthy } else { $null }
+    ConsecutiveFailures = if ($current) { $current.consecutive_failures } else { $null }
     NextRunAt = if ($current) { $current.next_run_at } else { $null }
     StatusFile = $statusFile
     LogFile = $logFile

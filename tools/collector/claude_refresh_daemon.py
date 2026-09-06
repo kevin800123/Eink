@@ -18,10 +18,10 @@ import msvcrt
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from runtime_support import atomic_json as write_atomic_json
 
 HERE = Path(__file__).resolve().parent
 REFRESH_SCRIPT = HERE / "refresh_claude.py"
@@ -38,6 +38,7 @@ DEFAULT_MINUTES = 30
 DEFAULT_REFRESH_TIMEOUT_SECONDS = 120
 MAX_LOG_BYTES = 1_000_000
 POLL_SECONDS = 0.5
+HEARTBEAT_SECONDS = 30
 
 
 def now_epoch():
@@ -49,18 +50,7 @@ def iso_now():
 
 
 def atomic_json(path, payload):
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    handle, tmp_path = tempfile.mkstemp(dir=str(STATE_DIR), suffix=".tmp")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, ensure_ascii=False)
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    write_atomic_json(path, payload)
 
 
 def append_log(message):
@@ -178,6 +168,7 @@ def run_refresh(timeout_seconds, claude_workdir):
 
 def write_status(status):
     try:
+        status["heartbeat_at"] = now_epoch()
         atomic_json(STATUS_FILE, status)
     except OSError as exc:
         append_log("status write failed: %r" % exc)
@@ -236,12 +227,16 @@ def main():
         )
 
         next_run = time.monotonic()
+        heartbeat_due = 0.0
+        consecutive_failures = 0
         while not STOP_FILE.exists():
             while time.monotonic() < next_run and not STOP_FILE.exists():
                 remaining = max(0, int(next_run - time.monotonic()))
                 status["seconds_until_next_run"] = remaining
                 status["next_run_at"] = now_epoch() + remaining
-                write_status(status)
+                if time.monotonic() >= heartbeat_due:
+                    write_status(status)
+                    heartbeat_due = time.monotonic() + HEARTBEAT_SECONDS
                 time.sleep(min(1.0, max(0.1, next_run - time.monotonic())))
 
             if STOP_FILE.exists():
@@ -249,6 +244,12 @@ def main():
 
             result = run_refresh(args.refresh_timeout_seconds, claude_workdir)
             status["last_refresh"] = result
+            succeeded = result["exit_code"] == 0 and result["cache_advanced"]
+            consecutive_failures = 0 if succeeded else consecutive_failures + 1
+            status["consecutive_failures"] = consecutive_failures
+            status["source_healthy"] = succeeded
+            if succeeded:
+                status["last_success_at"] = result["finished_at"]
             status["last_cache_captured_at"] = cache_stamp()
             next_run += interval_seconds
             if next_run <= time.monotonic():

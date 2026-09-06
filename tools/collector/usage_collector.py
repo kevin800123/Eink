@@ -31,8 +31,10 @@ status of unavailable plus an error_code instead.
 
 import argparse
 import json
+import math
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,6 +51,19 @@ CLAUDE_CACHE_DEFAULT = Path.home() / ".ai-usage-dashboard" / "claude.json"
 
 WINDOW_FIVE_HOUR = 300
 WINDOW_WEEKLY = 10080
+DEFAULT_MAX_AGE_SECONDS = 3600
+
+
+def observation_epoch(value):
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            return parsed.timestamp() if parsed.tzinfo else None
+        except (ValueError, OverflowError, OSError):
+            return None
+    if type(value) in (int, float) and math.isfinite(value) and value > 0:
+        return float(value)
+    return None
 
 
 def rate_limits_has_window(limits):
@@ -58,8 +73,8 @@ def rate_limits_has_window(limits):
     it still writes a rate_limits object, but with primary and secondary both
     null. Such a record carries no window timing, so it cannot be aged by the
     rollover rule and must not be treated as the current state. We skip it and
-    fall back to the most recent record that does carry a window; the rollover
-    rule then reports 0 once that window's resets_at has passed.
+    fall back to the most recent record that does carry a window, retaining
+    that record's observation time. Expired windows are never inferred as 0%.
     """
     if not isinstance(limits, dict):
         return False
@@ -68,8 +83,26 @@ def rate_limits_has_window(limits):
     )
 
 
+def reverse_lines(path):
+    """Read recent records first without rescanning entire large transcripts."""
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        position = stream.tell()
+        pending = b""
+        while position:
+            size = min(position, 256 * 1024)
+            position -= size
+            stream.seek(position)
+            pieces = (stream.read(size) + pending).split(b"\n")
+            pending = pieces[0]
+            for line in reversed(pieces[1:]):
+                yield line.decode("utf-8", "replace")
+        if pending:
+            yield pending.decode("utf-8", "replace")
+
+
 def find_codex_rate_limits(sessions_dir, max_files=40):
-    """Return (rate_limits_dict, error_code). Newest usable record wins.
+    """Return (limits, observed_at, error). Compare real record timestamps.
 
     Within a file the last record that carries a window is kept, since that is
     the most recent turn with real data. Null-shaped records (primary and
@@ -77,7 +110,7 @@ def find_codex_rate_limits(sessions_dir, max_files=40):
     so a fresh limit-exhaustion turn does not blank the dashboard.
     """
     if not sessions_dir.is_dir():
-        return None, "sessions_dir_missing"
+        return None, None, "sessions_dir_missing"
 
     try:
         files = sorted(
@@ -86,17 +119,19 @@ def find_codex_rate_limits(sessions_dir, max_files=40):
             reverse=True,
         )[:max_files]
     except OSError as exc:
-        return None, "scan_failed_" + exc.__class__.__name__
+        return None, None, "scan_failed_" + exc.__class__.__name__
 
     if not files:
-        return None, "no_session_files"
+        return None, None, "no_session_files"
 
     saw_record = False
+    best = None
+    best_stamp = None
     for path in files:
-        latest = None
         try:
-            with path.open("r", encoding="utf-8", errors="replace") as handle:
-                for line in handle:
+            records = reverse_lines(path)
+            try:
+                for line in records:
                     if RATE_LIMITS_MARKER not in line:
                         continue
                     try:
@@ -107,17 +142,23 @@ def find_codex_rate_limits(sessions_dir, max_files=40):
                     if found is not None:
                         saw_record = True
                         if rate_limits_has_window(found):
-                            latest = found
+                            stamp = observation_epoch(record.get("timestamp"))
+                            if stamp is not None and (best_stamp is None or stamp >= best_stamp):
+                                best, best_stamp = found, stamp
+                            if stamp is not None:
+                                break  # last usable record in this append-only file
+            finally:
+                records.close()
         except OSError:
             continue
-        if latest is not None:
-            return latest, None
+    if best is not None:
+        return best, best_stamp, None
 
     # Records existed but none carried a window: the account has no window to
     # report (typically an idle window that has since rolled over).
     if saw_record:
-        return None, "no_window_data"
-    return None, "no_rate_limit_record"
+        return None, None, "no_timestamped_window_data"
+    return None, None, "no_rate_limit_record"
 
 
 def extract_rate_limits(node):
@@ -139,41 +180,57 @@ def extract_rate_limits(node):
 
 
 def window_state(window, now_ts):
-    """Normalize one window and apply the rollover rule.
-
-    A window whose resets_at has already passed has rolled over, so its recorded
-    usage no longer applies and the correct value is 0. This is what makes stale
-    session data safe to read: staleness corrects itself instead of lying.
-    """
+    """Normalize an observed window; expiration is unknown usage, never zero."""
     if not isinstance(window, dict):
         return None
     used = window.get("used_percent")
-    if not isinstance(used, (int, float)):
+    if type(used) not in (int, float) or not math.isfinite(used) or not 0 <= used <= 100:
         return None
 
-    resets_at = window.get("resets_at")
-    if not isinstance(resets_at, (int, float)):
-        # A percentage with no reset time is still real, it just cannot be aged
-        # out. Report it rather than discarding it, and say the reset is unknown.
-        return {
-            "window_minutes": window.get("window_minutes"),
-            "used_percent": max(0, min(100, int(round(used)))),
-            "reset_at": None,
-            "rolled_over": False,
-        }
-
+    resets_at = observation_epoch(window.get("resets_at"))
+    if resets_at is None:
+        return None
+    try:
+        reset_iso = datetime.fromtimestamp(resets_at, timezone.utc).isoformat()
+    except (ValueError, OverflowError, OSError):
+        return None
     expired = resets_at <= now_ts
     return {
         "window_minutes": window.get("window_minutes"),
-        "used_percent": 0 if expired else max(0, min(100, int(round(used)))),
-        "reset_at": datetime.fromtimestamp(resets_at).astimezone().isoformat(),
+        "used_percent": None if expired else int(round(used)),
+        "reset_at": reset_iso,
         "rolled_over": expired,
     }
 
 
-def build_codex_provider(sessions_dir):
+def observed_provider(provider_id, label, five, week, observed_at, now_ts, max_age):
+    """Old firmware has provider-level availability only: fail closed as a row."""
+    stamp = observation_epoch(observed_at)
+    age = None if stamp is None else max(0, int(now_ts - stamp))
+    error = None
+    if stamp is None or stamp > now_ts + 60:
+        error = "invalid_observation_time"
+    elif now_ts - stamp > max_age:
+        error = "source_stale"
+    elif five is None or week is None:
+        error = "incomplete_windows"
+    elif five["rolled_over"] or week["rolled_over"]:
+        error = "awaiting_new_window"
+    if error:
+        result = unavailable(provider_id, label, error)
+    else:
+        result = {
+            "id": provider_id, "label": label, "status": "ok",
+            "usage_percent": five["used_percent"], "reset_at": five["reset_at"],
+            "windows": {"five_hour": five, "weekly": week},
+        }
+    result.update(observed_at=stamp, age_seconds=age, stale=bool(error), max_age_seconds=max_age)
+    return result
+
+
+def build_codex_provider(sessions_dir, max_age=DEFAULT_MAX_AGE_SECONDS):
     now_ts = time.time()
-    limits, error = find_codex_rate_limits(sessions_dir)
+    limits, observed_at, error = find_codex_rate_limits(sessions_dir)
     if limits is None:
         return unavailable("codex", "CODEX", error or "unknown")
 
@@ -182,27 +239,12 @@ def build_codex_provider(sessions_dir):
     if primary is None and secondary is None:
         return unavailable("codex", "CODEX", "malformed_rate_limits")
 
-    # The 5-hour window is the constraint that blocks work soonest, so it is the
-    # headline number. The weekly window travels alongside it so the firmware can
-    # switch to it later without a collector change.
-    headline = primary or secondary
-    provider = {
-        "id": "codex",
-        "label": "CODEX",
-        "status": "ok",
-        "usage_percent": headline["used_percent"],
-        "reset_at": headline["reset_at"],
-        "plan_type": limits.get("plan_type"),
-        "windows": {},
-    }
-    if primary is not None:
-        provider["windows"]["five_hour"] = primary
-    if secondary is not None:
-        provider["windows"]["weekly"] = secondary
+    provider = observed_provider("codex", "CODEX", primary, secondary, observed_at, now_ts, max_age)
+    provider["plan_type"] = limits.get("plan_type")
     return provider
 
 
-def build_claude_provider(cache_path):
+def build_claude_provider(cache_path, max_age=DEFAULT_MAX_AGE_SECONDS):
     """Claude quota comes from the documented statusLine payload.
 
     tools/collector/claude_statusline.py captures rate_limits.five_hour and
@@ -237,20 +279,9 @@ def build_claude_provider(cache_path):
     if seven_day is not None:
         seven_day["window_minutes"] = WINDOW_WEEKLY
 
-    headline = five_hour or seven_day
-    provider = {
-        "id": "claude",
-        "label": "CLAUDE",
-        "status": "ok",
-        "usage_percent": headline["used_percent"],
-        "reset_at": headline["reset_at"],
-        "captured_at": cached.get("captured_at"),
-        "windows": {},
-    }
-    if five_hour is not None:
-        provider["windows"]["five_hour"] = five_hour
-    if seven_day is not None:
-        provider["windows"]["weekly"] = seven_day
+    provider = observed_provider("claude", "CLAUDE", five_hour, seven_day,
+                                 cached.get("captured_at"), now_ts, max_age)
+    provider["captured_at"] = provider["observed_at"]
     return provider
 
 
@@ -263,13 +294,13 @@ def unavailable(provider_id, label, error_code):
     }
 
 
-def build_payload(sessions_dir, claude_cache):
+def build_payload(sessions_dir, claude_cache, max_age=DEFAULT_MAX_AGE_SECONDS):
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
         "providers": [
-            build_claude_provider(claude_cache),
-            build_codex_provider(sessions_dir),
+            build_claude_provider(claude_cache, max_age),
+            build_codex_provider(sessions_dir, max_age),
             unavailable("gemini", "GEMINI", "no_official_api"),
         ],
     }
@@ -283,6 +314,8 @@ class Handler(BaseHTTPRequestHandler):
     cache_seconds = 60
     cache = None
     cache_at = 0.0
+    max_age_seconds = DEFAULT_MAX_AGE_SECONDS
+    cache_lock = threading.Lock()
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -297,7 +330,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
-        if self.path.split("?")[0] != "/v1/dashboard":
+        route = self.path.split("?")[0]
+        if route not in ("/v1/dashboard", "/healthz"):
             self.send_json(404, {"error": "not_found"})
             return
 
@@ -306,11 +340,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(401, {"error": "unauthorized"})
                 return
 
-        now = time.time()
-        if Handler.cache is None or now - Handler.cache_at >= Handler.cache_seconds:
-            Handler.cache = build_payload(Handler.sessions_dir, Handler.claude_cache)
-            Handler.cache_at = now
-        self.send_json(200, Handler.cache)
+        # Health is independent of provider freshness. An idle Codex or offline
+        # Claude must not trigger an endless HTTP-server restart loop.
+        if route == "/healthz":
+            self.send_json(200, {"service": "ai-usage-collector", "pid": os.getpid(), "status": "ok"})
+            return
+        with Handler.cache_lock:
+            now = time.monotonic()
+            if Handler.cache is None or now - Handler.cache_at >= Handler.cache_seconds:
+                try:
+                    Handler.cache = build_payload(Handler.sessions_dir, Handler.claude_cache, Handler.max_age_seconds)
+                except Exception:
+                    self.send_json(503, {"error": "source_read_failed"})
+                    return
+                Handler.cache_at = now
+            payload = Handler.cache
+        self.send_json(200, payload)
 
 
 def _ensure_std_streams():
@@ -345,16 +390,22 @@ def main():
         help="Minimum seconds between rescans of the session files",
     )
     parser.add_argument(
+        "--max-age-seconds", type=int, default=DEFAULT_MAX_AGE_SECONDS,
+        help="Maximum source observation age; older data is unavailable",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="Print the payload once and exit instead of serving",
     )
     args = parser.parse_args()
+    if args.max_age_seconds < 60 or args.cache_seconds < 0:
+        parser.error("max age must be >=60 and cache seconds must be >=0")
 
     sessions_dir = Path(args.sessions_dir)
 
     if args.once:
-        payload = build_payload(sessions_dir, Path(args.claude_cache))
+        payload = build_payload(sessions_dir, Path(args.claude_cache), args.max_age_seconds)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
@@ -380,6 +431,7 @@ def main():
     Handler.sessions_dir = sessions_dir
     Handler.claude_cache = Path(args.claude_cache)
     Handler.cache_seconds = args.cache_seconds
+    Handler.max_age_seconds = args.max_age_seconds
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     sys.stderr.write(

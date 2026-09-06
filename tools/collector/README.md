@@ -71,7 +71,7 @@ root. If it is a new clone, run plain `claude` there once, accept the workspace
 trust dialog, then exit before installing the daemon.
 
 The launcher is
-`shell:startup\AIUsageDashboardClaudeRefresh.vbs`. It runs only after this user
+`shell:startup\AI Usage Dashboard - Claude Refresh.vbs`. It runs only after this user
 logs on; it does not use Task Scheduler or `pythonw.exe`, both of which lack the
 usable console context that this ConPTY needs. Runtime files are under
 `~/.ai-usage-dashboard/`:
@@ -136,13 +136,17 @@ Each turn the CLI records:
 
 `window_minutes` 300 is the 5-hour window, 10080 is the weekly window.
 
-**The rollover rule matters.** The collector reads the newest record it can
-find, which may be hours old if you have not used Codex recently. Rather than
-serving a stale number, it compares `resets_at` against the current time: a
-window whose reset has already passed has rolled over, so its usage is reported
-as `0` with `rolled_over: true`. Staleness therefore corrects itself instead of
-lying. A window whose reset is still in the future is by definition still the
-current window, so its recorded usage is accurate.
+**Freshness is explicit.** The collector compares actual event timestamps across
+the 40 most recently modified session files, reading backwards from each file's
+tail. File modification time is only a search hint, never proof of freshness.
+Null-window records do not refresh the timestamp of an older usable observation.
+
+An expired reset means the old window ended; it does not prove the new window
+has 0% usage. Both providers therefore return `status: "unavailable"` without
+percentages when either window has expired, is missing, or the observation is
+older than 60 minutes. A genuine fresh 0% observation is still shown as 0%.
+An idle Codex session can consequently become unavailable until Codex writes
+another real observation. This is intentional, not a reason to restart a server.
 
 `usage_percent` at the top level is the 5-hour window, because that is the
 constraint that blocks work soonest. Both windows are also returned under
@@ -169,7 +173,51 @@ python tools/collector/usage_collector.py --once
 
 Options: `--host` (default `0.0.0.0`), `--port` (default `8770`),
 `--sessions-dir`, `--cache-seconds` (default `60`, how often the session files
-are rescanned).
+are rescanned), `--max-age-seconds` (default `3600`, source freshness limit).
+
+## PC-only hardening (2026-09-06)
+
+- Schema version stays `1`, with the same three provider IDs. No firmware
+  upload is required. Existing firmware renders an unavailable provider as
+  `UNAVAILABLE / N/A`; a distinct on-screen `STALE` label needs a later firmware
+  update. A failed network request still leaves the old physical image visible.
+- `observed_at` is a Unix timestamp for the source observation; `age_seconds`,
+  `max_age_seconds`, and `stale` are additive metadata. `generated_at` remains
+  the API payload generation time, not the age of the source. HTTP response
+  caching can delay a freshness transition by up to `--cache-seconds`.
+- Error codes: `source_stale`, `awaiting_new_window`, `incomplete_windows`,
+  `invalid_observation_time`. Entire rows fail closed because existing firmware
+  cannot represent a missing individual window without inventing a 0% bar.
+- `GET /healthz` requires the same device token and returns service identity
+  and process PID. The HTTP supervisor checks both it and `/v1/dashboard` every
+  30 seconds with bounded timeouts. Three consecutive failures restart only its
+  own child process; retries back off from 5 to 300 seconds. Unavailable providers
+  and source-read 503 errors do not cause restart loops.
+- `process_control.ps1` identifies an exact full Python script path and verifies
+  executable/start time before stopping a process. Installer port conflicts fail
+  without killing the foreign listener. Other clones and command-line substrings
+  do not count as ownership.
+- Claude heartbeat writes are every 30 seconds while idle, with bounded retries
+  for transient file-sharing errors. A watchdog requires two unhealthy checks
+  and verifies the daemon's exact script path/start time before stopping a stale
+  live daemon and its captured descendants. Source refresh failures remain visible
+  in status, and keep the configured cadence (no rapid extra paid Claude turns).
+- HTTP supervisor state/log: `~/.ai-usage-dashboard/collector_server_status.json`
+  and `collector_server_daemon.log`. Claude watchdog state/log:
+  `claude_watchdog_status.json` and `claude_watchdog.log`. Logs rotate at 1 MB.
+
+Tests (Windows, standard-library unittest; no real Claude API calls):
+
+```powershell
+python -B -m unittest discover -s tools/collector/tests -p "test_*.py" -v
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/collector/tests/test_process_control.ps1
+```
+
+The Windows integration tests create temporary state and loopback-only fixture
+processes, exercise hung/crashed-child recovery and foreign-port protection, then
+stop only those fixtures. They need CIM access in a normal logged-on Windows
+session; a restricted automation sandbox may block CIM. They do not delete the
+real Claude cache, restart production services, or exercise the e-paper hardware.
 
 ## Known deviation from the contract
 

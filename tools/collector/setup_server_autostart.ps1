@@ -14,6 +14,7 @@
 #   .\tools\collector\setup_server_autostart.ps1 -Remove
 
 param(
+  [ValidateRange(1, 65535)]
   [int]$Port = 8770,
   [switch]$Status,
   [switch]$Remove
@@ -23,8 +24,23 @@ $ErrorActionPreference = 'Stop'
 
 $here = $PSScriptRoot
 $daemon = Join-Path $here 'collector_server_daemon.py'
+$serverScript = Join-Path $here 'usage_collector.py'
+. (Join-Path $here 'process_control.ps1')
 $startupDir = [Environment]::GetFolderPath('Startup')
 $launcher = Join-Path $startupDir 'AI Usage Dashboard - Collector Server.vbs'
+
+function Test-HTTPHealth([int]$p) {
+  $token = $env:AI_DASH_DEVICE_TOKEN
+  if (-not $token -and (Test-Path -LiteralPath (Join-Path $here 'token.local'))) {
+    $token = (Get-Content -Raw -LiteralPath (Join-Path $here 'token.local')).Trim()
+  }
+  if (-not $token) { return $false }
+  try {
+    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$p/healthz" -Headers @{Authorization="Bearer $token"} -TimeoutSec 2
+    $entry = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$health.pid)"
+    return $health.service -eq 'ai-usage-collector' -and (Test-OwnedPythonProcess $entry $serverScript)
+  } catch { return $false }
+}
 
 function Test-Listening([int]$p) {
   return (Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue |
@@ -32,19 +48,26 @@ function Test-Listening([int]$p) {
 }
 
 function Stop-ServerStack([int]$p) {
-  # Stop the supervisor first so it does not immediately respawn the server.
-  Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*collector_server_daemon.py*' } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  # Refuse an occupied foreign port before changing any running process.
+  Assert-OwnedPort $p
+  Stop-OwnedPythonProcesses $daemon
   Start-Sleep -Milliseconds 300
-  Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty OwningProcess -Unique |
-    ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+  Stop-OwnedPythonProcesses $serverScript
 }
 
 function Test-SupervisorRunning {
-  return [bool](Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*collector_server_daemon.py*' })
+  return [bool](@(Get-OwnedPythonProcesses $daemon).Count)
+}
+
+function Assert-OwnedPort([int]$p) {
+  $owners = @(Get-NetTCPConnection -State Listen -LocalPort $p -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique)
+  foreach ($ownerId in $owners) {
+    $entry = Get-CimInstance Win32_Process -Filter "ProcessId=$ownerId"
+    if (-not (Test-OwnedPythonProcess $entry $serverScript)) {
+      throw "Port $p is owned by another service (PID $ownerId). No process was stopped."
+    }
+  }
 }
 
 if ($Status) {
@@ -52,6 +75,7 @@ if ($Status) {
     LauncherInstalled  = Test-Path -LiteralPath $launcher
     SupervisorRunning  = Test-SupervisorRunning
     PortListening      = Test-Listening $Port
+    HTTPHealthy        = Test-HTTPHealth $Port
     Port               = $Port
     Launcher           = $launcher
   }
@@ -59,6 +83,7 @@ if ($Status) {
 }
 
 if ($Remove) {
+  Assert-OwnedPort $Port
   if (Test-Path -LiteralPath $launcher) { Remove-Item -LiteralPath $launcher -Force }
   Stop-ServerStack $Port
   Write-Host 'Removed the collector server launcher and stopped the server + supervisor.'
@@ -66,6 +91,12 @@ if ($Remove) {
 }
 
 if (-not (Test-Path -LiteralPath $daemon)) { throw "Not found: $daemon" }
+# Fail before stopping a healthy stack if the replacement cannot authenticate.
+$deviceToken = $env:AI_DASH_DEVICE_TOKEN
+if (-not $deviceToken -and (Test-Path -LiteralPath (Join-Path $here 'token.local'))) {
+  $deviceToken = (Get-Content -Raw -LiteralPath (Join-Path $here 'token.local')).Trim()
+}
+if (-not $deviceToken) { throw 'Missing token.local or AI_DASH_DEVICE_TOKEN; run run.ps1 once first.' }
 
 # pythonw.exe has no console window; the supervisor and server need none.
 $pythonw = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Python\Python314\pythonw.exe'
@@ -94,6 +125,10 @@ $deadline = (Get-Date).AddSeconds(20)
 do {
   Start-Sleep -Milliseconds 400
   $listening = Test-Listening $Port
+  if ($listening) {
+    Assert-OwnedPort $Port
+    $listening = Test-HTTPHealth $Port
+  }
 } while (-not $listening -and (Get-Date) -lt $deadline)
 
 if (-not $listening) {
