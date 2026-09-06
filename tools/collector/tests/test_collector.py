@@ -41,16 +41,21 @@ class FreshnessTests(unittest.TestCase):
         self.assertFalse(result['stale'])
         self.assertEqual(result['windows']['weekly']['used_percent'], 61)
 
-    def test_stale_snapshot_is_not_ok(self):
+    def test_stale_snapshot_is_shown_but_flagged(self):
+        # Staleness must not hide the numbers (the dashboard is for glancing);
+        # it stays ok with the last values and a stale flag for transparency.
         result = self.claude(age=3601)
-        self.assertEqual(result['error_code'], 'source_stale')
-        self.assertNotIn('usage_percent', result)
-        self.assertNotIn('windows', result)  # old parser cannot turn absent week into 0
+        self.assertEqual(result['status'], 'ok')
+        self.assertTrue(result['stale'])
+        self.assertGreater(result['age_seconds'], 3600)
+        self.assertEqual(result['windows']['weekly']['used_percent'], 61)
 
-    def test_expired_window_is_never_zero(self):
+    def test_expired_window_reads_zero_and_stays_ok(self):
+        # A window past its reset has rolled over to a fresh 0, not N/A.
         result = self.claude(five_hour=self.window(85, self.now-1))
-        self.assertEqual(result['error_code'], 'awaiting_new_window')
-        self.assertNotIn('usage_percent', result)
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(result['windows']['five_hour']['used_percent'], 0)
+        self.assertTrue(result['windows']['five_hour']['rolled_over'])
 
     def test_missing_week_or_reset_is_unavailable(self):
         for values in ({'seven_day': None}, {'five_hour': {'used_percent': 1}}):
@@ -82,7 +87,11 @@ class FreshnessTests(unittest.TestCase):
         path.write_text(json.dumps(self.record(self.now-4000, 45))+'\n'+
                         json.dumps({'timestamp': self.now, 'rate_limits': {'primary': None}})+'\n', encoding='utf-8')
         result = collector.build_codex_provider(self.root)
-        self.assertEqual(result['error_code'], 'source_stale')
+        # The null record must not refresh the observation time: it stays old
+        # (so the reading is flagged stale) rather than looking fresh.
+        self.assertEqual(result['status'], 'ok')
+        self.assertGreater(result['age_seconds'], 3600)
+        self.assertTrue(result['stale'])
 
     def test_reverse_reader_crosses_block_and_partial_tail(self):
         path = self.root/'session.jsonl'

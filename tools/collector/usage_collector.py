@@ -180,7 +180,10 @@ def extract_rate_limits(node):
 
 
 def window_state(window, now_ts):
-    """Normalize an observed window; expiration is unknown usage, never zero."""
+    """Normalize an observed window. A window past its reset has rolled over, so
+    its usage is 0 (a fresh window), not unknown — this keeps the dashboard
+    showing a real number to glance at instead of N/A when a provider has been
+    idle."""
     if not isinstance(window, dict):
         return None
     used = window.get("used_percent")
@@ -197,7 +200,7 @@ def window_state(window, now_ts):
     expired = resets_at <= now_ts
     return {
         "window_minutes": window.get("window_minutes"),
-        "used_percent": None if expired else int(round(used)),
+        "used_percent": 0 if expired else int(round(used)),
         "reset_at": reset_iso,
         "rolled_over": expired,
     }
@@ -208,14 +211,15 @@ def observed_provider(provider_id, label, five, week, observed_at, now_ts, max_a
     stamp = observation_epoch(observed_at)
     age = None if stamp is None else max(0, int(now_ts - stamp))
     error = None
+    # Only genuinely missing/broken data makes a provider unavailable. Staleness
+    # and a rolled-over window are NOT unavailability: we still show the last
+    # numbers (with rolled-over windows at 0), and expose `stale`/`age_seconds`
+    # so a stale reading can be flagged rather than hidden.
     if stamp is None or stamp > now_ts + 60:
         error = "invalid_observation_time"
-    elif now_ts - stamp > max_age:
-        error = "source_stale"
     elif five is None or week is None:
         error = "incomplete_windows"
-    elif five["rolled_over"] or week["rolled_over"]:
-        error = "awaiting_new_window"
+    stale = bool(stamp is not None and now_ts - stamp > max_age)
     if error:
         result = unavailable(provider_id, label, error)
     else:
@@ -224,7 +228,7 @@ def observed_provider(provider_id, label, five, week, observed_at, now_ts, max_a
             "usage_percent": five["used_percent"], "reset_at": five["reset_at"],
             "windows": {"five_hour": five, "weekly": week},
         }
-    result.update(observed_at=stamp, age_seconds=age, stale=bool(error), max_age_seconds=max_age)
+    result.update(observed_at=stamp, age_seconds=age, stale=stale, max_age_seconds=max_age)
     return result
 
 
