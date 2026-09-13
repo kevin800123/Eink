@@ -17,3 +17,6 @@ Thumbs.db
 # Collector device token
 tools/collector/token.local
 __pycache__/
+
+# Cloud relay push config (URL + ingest token)
+tools/collector/cloud_push.local.json
