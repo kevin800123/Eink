@@ -1,0 +1,9 @@
+{
+  "name": "ai-usage-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Private relay that stores the latest AI usage snapshot and serves it to the e-paper device (Zeabur/Node).",
+  "type": "commonjs",
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server.js" }
+}
